@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ecommerce-jumpers-server
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build -w @tetherbound/shared && npm run build -w @tetherbound/server
+    startCommand: npm run start -w @tetherbound/server
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: RECONNECT_TIMEOUT_MS
+        value: "30000"
+      - key: CLIENT_ORIGIN
+        sync: false

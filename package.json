@@ -1,0 +1,29 @@
+{
+  "name": "ecommerce-jumpers",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["shared", "client", "server"],
+  "scripts": {
+    "predev": "npm run build -w @tetherbound/shared",
+    "predev:client": "npm run build -w @tetherbound/shared",
+    "predev:server": "npm run build -w @tetherbound/shared",
+    "dev": "concurrently -n SERVER,CLIENT -c magenta,cyan \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "npm run dev -w @tetherbound/client",
+    "dev:server": "npm run dev -w @tetherbound/server",
+    "build": "npm run build -w @tetherbound/shared && npm run build -w @tetherbound/server && npm run build -w @tetherbound/client",
+    "pretypecheck": "npm run build -w @tetherbound/shared",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "pretest": "npm run build -w @tetherbound/shared",
+    "test": "vitest run tests/unit",
+    "test:e2e": "playwright test"
+  },
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.2",
+    "concurrently": "^9.2.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
