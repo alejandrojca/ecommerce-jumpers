@@ -69,7 +69,7 @@ export class GameScene extends Phaser.Scene {
     this.latest = snapshot;
     this.snapshots.push(snapshot);
     const local = snapshot.players.find((p) => p.id === this.network.playerId);
-    if (local) this.predictionError = this.prediction.reconcile(local);
+    if (local) this.predictionError = this.prediction.reconcile(local, snapshot);
   };
 
   private renderWorld(): void {

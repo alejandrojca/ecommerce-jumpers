@@ -8,6 +8,7 @@ import { derivePlayerState } from "./PlayerStateMachine.js";
 import { buildVictoryResults, recordFirstExit } from "./VictorySystem.js";
 import { allConnectedPlayersInVoid } from "./RespawnSystem.js";
 import { anchorMobilityMultiplier, calculateAnchorLoads } from "./AnchorLoadSystem.js";
+import { findGroundContact } from "./GroundContactSystem.js";
 
 interface PlayerRuntime {
   id: string;
@@ -26,6 +27,7 @@ interface PlayerRuntime {
   connected: boolean;
   voidLocked: boolean;
   supportedHangingPlayers: number;
+  supportBody?: Matter.Body;
   lastValid: { x: number; y: number; vx: number; vy: number };
 }
 
@@ -95,6 +97,7 @@ export class ServerGame {
       grounded: false, coyoteUntil: 0, jumpBufferedUntil: 0, jumpWasHeld: false,
       deadUntil: 0, invulnerableUntil: 0, checkpoint: { x, y: level1.spawn.y }, connected: true,
       voidLocked: false, supportedHangingPlayers: 0,
+      supportBody: undefined,
       lastValid: { x, y: level1.spawn.y, vx: 0, vy: 0 },
     });
   }
@@ -216,7 +219,19 @@ export class ServerGame {
 
   private postPhysics(p: PlayerRuntime, now: number): void {
     const b = p.body;
-    p.grounded = this.detectGrounded(b);
+    const contact = findGroundContact(b, this.engine.pairs.list);
+    p.grounded = contact !== undefined;
+    p.supportBody = contact?.support;
+    if (contact) {
+      const expectedY = contact.support.bounds.min.y - PHYSICS.PLAYER_HEIGHT / 2;
+      const penetration = b.position.y - expectedY;
+      if (penetration > 0 && penetration <= 14) {
+        Matter.Body.setPosition(b, { x: b.position.x, y: expectedY });
+      }
+      if (b.velocity.y > contact.support.velocity.y) {
+        Matter.Body.setVelocity(b, { x: b.velocity.x, y: contact.support.velocity.y });
+      }
+    }
     if (b.position.y > level1.deathY) p.voidLocked = true;
     if (p.voidLocked && p.grounded) {
       p.voidLocked = false;
@@ -242,17 +257,6 @@ export class ServerGame {
       recordFirstExit(this.exitTimes, p.id, this.matchStartedAt, now);
     }
     this.updateVictory();
-  }
-
-  private detectGrounded(body: Matter.Body): boolean {
-    const bottom = body.bounds.max.y;
-    return [...this.platforms, ...this.boxes, ...[...this.players.values()].map((p) => p.body)]
-      .some((other) => other !== body
-        && body.bounds.max.x > other.bounds.min.x + 3
-        && body.bounds.min.x < other.bounds.max.x - 3
-        && bottom >= other.bounds.min.y - 6
-        && bottom <= other.bounds.min.y + 10
-        && body.velocity.y >= -0.2);
   }
 
   private moveLift(dt: number): void {
@@ -299,6 +303,7 @@ export class ServerGame {
       Matter.Body.setAngularVelocity(player.body, 0);
       player.input = { ...EMPTY_INPUT, sequence: player.lastSequence };
       player.grounded = false;
+      player.supportBody = undefined;
       player.coyoteUntil = 0;
       player.jumpBufferedUntil = 0;
       player.jumpWasHeld = false;
@@ -340,14 +345,28 @@ export class ServerGame {
         ),
         facing: p.body.velocity.x < -0.05 ? "left" : "right", grounded: p.grounded,
         connected: p.connected, lastProcessedInput: p.lastSequence,
-        supportedHangingPlayers: p.supportedHangingPlayers
+        supportedHangingPlayers: p.supportedHangingPlayers,
+        support: p.supportBody ? {
+          id: p.supportBody.label,
+          topY: p.supportBody.bounds.min.y,
+          velocityX: p.supportBody.velocity.x * 60,
+          velocityY: p.supportBody.velocity.y * 60,
+        } : undefined,
       };
     });
     return {
       serverTick: this.tick, serverTime: Date.now(), players, ropes: this.ropes,
       objects: [
-        ...this.boxes.map((b, i) => ({ id: level1.boxes[i]!.id, kind: "box" as const, x: b.position.x, y: b.position.y, width: level1.boxes[i]!.width, height: level1.boxes[i]!.height })),
-        ...this.platforms.map((b) => ({ id: b.label, kind: "platform" as const, x: b.position.x, y: b.position.y, width: b.bounds.max.x - b.bounds.min.x, height: b.bounds.max.y - b.bounds.min.y }))
+        ...this.boxes.map((b, i) => ({
+          id: b.label, kind: "box" as const, x: b.position.x, y: b.position.y,
+          width: level1.boxes[i]!.width, height: level1.boxes[i]!.height,
+          velocityX: b.velocity.x * 60, velocityY: b.velocity.y * 60,
+        })),
+        ...this.platforms.map((b) => ({
+          id: b.label, kind: "platform" as const, x: b.position.x, y: b.position.y,
+          width: b.bounds.max.x - b.bounds.min.x, height: b.bounds.max.y - b.bounds.min.y,
+          velocityX: b.velocity.x * 60, velocityY: b.velocity.y * 60,
+        }))
       ],
       keyState: { collected: this.keyCollected, holderId: this.keyHolder, ...level1.key },
       doorState: { open: this.keyCollected, inside, required, x: level1.door.x, y: level1.door.y },
@@ -377,6 +396,7 @@ export class ServerGame {
       p.deadUntil = 0;
       p.voidLocked = false;
       p.supportedHangingPlayers = 0;
+      p.supportBody = undefined;
     }
   }
 }

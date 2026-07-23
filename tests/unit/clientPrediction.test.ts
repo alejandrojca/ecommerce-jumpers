@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PlayerInput, PlayerSnapshot } from "@tetherbound/shared";
+import type { GameSnapshot, PlayerInput, PlayerSnapshot } from "@tetherbound/shared";
 import { ClientPrediction } from "../../client/src/network/ClientPrediction";
 
 const player = (overrides: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
@@ -26,6 +26,21 @@ const input = (sequence: number, jumpPressed = false): PlayerInput => ({
   jumpPressed,
   jumpHeld: jumpPressed,
   clientTime: sequence
+});
+
+const world = (local: PlayerSnapshot, others: PlayerSnapshot[] = []): GameSnapshot => ({
+  serverTick: 1,
+  serverTime: 1000,
+  players: [local, ...others],
+  ropes: [],
+  objects: [{
+    id: "platform:start", kind: "platform", x: 200, y: 650, width: 400, height: 50,
+    velocityX: 0, velocityY: 0
+  }],
+  keyState: { collected: false, x: 0, y: 0 },
+  doorState: { open: false, inside: 0, required: 1, x: 0, y: 0 },
+  matchState: "playing",
+  victoryResults: []
 });
 
 describe("ClientPrediction", () => {
@@ -63,5 +78,28 @@ describe("ClientPrediction", () => {
     const before = prediction.x;
     prediction.reconcile(player({ lastProcessedInput: 0 }));
     expect(prediction.x).toBeCloseTo(before, 5);
+  });
+
+  it("lands predicted falling movement on a platform instead of crossing it", () => {
+    const prediction = new ClientPrediction();
+    const falling = player({
+      y: 590, velocityY: 300, grounded: false, state: "Falling"
+    });
+    prediction.reconcile(falling, world(falling));
+    for (let sequence = 1; sequence <= 10; sequence++) {
+      prediction.predict(input(sequence), 1 / 60);
+    }
+    expect(prediction.y).toBeCloseTo(604);
+    expect(prediction.vy).toBe(0);
+  });
+
+  it("snaps an authoritative grounded player to the reported support top", () => {
+    const prediction = new ClientPrediction();
+    const grounded = player({
+      y: 612,
+      support: { id: "platform:start", topY: 625, velocityX: 0, velocityY: 0 }
+    });
+    prediction.reconcile(grounded, world(grounded));
+    expect(prediction.y).toBe(604);
   });
 });

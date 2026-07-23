@@ -6,7 +6,10 @@ const snapshot = (time: number, x: number): GameSnapshot => ({
   serverTick: time / 50, serverTime: time,
   players: [{ id: "p", name: "P", color: 1, x, y: 20, velocityX: 0, velocityY: 0, state: "Idle", facing: "right", grounded: true, connected: true, lastProcessedInput: 1, supportedHangingPlayers: 0 }],
   ropes: [{ a: "p", b: "q", distance: x, tension: x, active: true, points: [{ x, y: 10 }] }],
-  objects: [{ id: "moving", kind: "platform", x, y: 30, width: 80, height: 20 }],
+  objects: [{
+    id: "moving", kind: "platform", x, y: 30, width: 80, height: 20,
+    velocityX: 0, velocityY: 0
+  }],
   keyState: { collected: false, x: 0, y: 0 },
   doorState: { open: false, inside: 0, required: 1, x: 0, y: 0 },
   matchState: "playing",

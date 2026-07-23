@@ -33,6 +33,12 @@ export interface PlayerSnapshot {
   connected: boolean;
   lastProcessedInput: number;
   supportedHangingPlayers: number;
+  support?: {
+    id: string;
+    topY: number;
+    velocityX: number;
+    velocityY: number;
+  };
 }
 
 export interface RopeSnapshot {
@@ -51,6 +57,8 @@ export interface ObjectSnapshot {
   y: number;
   width: number;
   height: number;
+  velocityX: number;
+  velocityY: number;
 }
 
 export interface VictoryResult {
