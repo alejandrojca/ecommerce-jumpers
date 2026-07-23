@@ -2,44 +2,57 @@ import { NETWORK, PHYSICS, type PlayerInput, type PlayerSnapshot } from "@tether
 
 interface Predicted { input: PlayerInput; dt: number }
 export class ClientPrediction {
-  x = 0; y = 0; vx = 0; vy = 0;
+  private simulationX = 0;
+  private simulationY = 0;
+  private simulationVx = 0;
+  private simulationVy = 0;
+  private correctionX = 0;
+  private correctionY = 0;
   private pending: Predicted[] = [];
   private initialized = false;
   private grounded = false;
   private movementLocked = false;
 
+  get x(): number { return this.simulationX + this.correctionX; }
+  get y(): number { return this.simulationY + this.correctionY; }
+  get vx(): number { return this.simulationVx; }
+  get vy(): number { return this.simulationVy; }
+
   predict(input: PlayerInput, dt: number): void {
     if (!this.initialized) return;
     this.pending.push({ input, dt });
     this.integrate(input, dt);
+    const smoothing = Math.pow(0.78, dt * 60);
+    this.correctionX *= smoothing;
+    this.correctionY *= smoothing;
   }
 
   reconcile(authoritative: PlayerSnapshot): number {
     if (!this.initialized) {
-      this.x = authoritative.x; this.y = authoritative.y;
-      this.vx = authoritative.velocityX; this.vy = authoritative.velocityY;
+      this.setAuthoritative(authoritative);
       this.grounded = authoritative.grounded;
       this.movementLocked = authoritative.state === "Hanging";
       this.initialized = true;
       return 0;
     }
-    const error = Math.hypot(authoritative.x - this.x, authoritative.y - this.y);
+    const previousX = this.x;
+    const previousY = this.y;
     this.pending = this.pending.filter((p) => p.input.sequence > authoritative.lastProcessedInput);
-    if (error > NETWORK.HARD_CORRECTION_DISTANCE || authoritative.state === "Hanging") {
-      this.x = authoritative.x; this.y = authoritative.y;
-    } else {
-      this.x += (authoritative.x - this.x) * 0.18;
-      // Ground contact is not predicted locally. Pinning the vertical axis to
-      // the authoritative floor prevents gravity from visually sinking the body.
-      this.y = authoritative.grounded
-        ? authoritative.y
-        : this.y + (authoritative.y - this.y) * 0.18;
-    }
-    this.vx = authoritative.velocityX;
-    this.vy = authoritative.velocityY;
+    this.setAuthoritative(authoritative);
     this.grounded = authoritative.grounded;
     this.movementLocked = authoritative.state === "Hanging";
     for (const pending of this.pending) this.integrate(pending.input, pending.dt);
+    const error = Math.hypot(this.simulationX - previousX, this.simulationY - previousY);
+    if (error > NETWORK.HARD_CORRECTION_DISTANCE || this.movementLocked) {
+      this.correctionX = 0;
+      this.correctionY = 0;
+    } else {
+      // Keep the rendered position continuous while the correction offset
+      // decays. The simulation itself always starts from the authoritative
+      // state, so pending inputs are replayed exactly once.
+      this.correctionX = previousX - this.simulationX;
+      this.correctionY = previousY - this.simulationY;
+    }
     return error;
   }
 
@@ -47,18 +60,33 @@ export class ClientPrediction {
 
   private integrate(input: PlayerInput, dt: number): void {
     const direction = this.movementLocked ? 0 : Number(input.right) - Number(input.left);
-    if (direction) this.vx = Math.max(-PHYSICS.MAX_RUN_SPEED, Math.min(PHYSICS.MAX_RUN_SPEED, this.vx + direction * PHYSICS.AIR_ACCELERATION * dt));
-    else this.vx *= Math.pow(PHYSICS.AIR_DRAG, dt * 60);
+    if (direction) {
+      this.simulationVx = Math.max(
+        -PHYSICS.MAX_RUN_SPEED,
+        Math.min(PHYSICS.MAX_RUN_SPEED, this.simulationVx + direction * PHYSICS.AIR_ACCELERATION * dt)
+      );
+    } else {
+      this.simulationVx *= Math.pow(PHYSICS.AIR_DRAG, dt * 60);
+    }
     if (!this.movementLocked && input.jumpPressed && this.grounded) {
-      this.vy = PHYSICS.JUMP_VELOCITY;
+      this.simulationVy = PHYSICS.JUMP_VELOCITY;
       this.grounded = false;
     }
     if (!this.grounded) {
-      this.vy = Math.min(PHYSICS.MAX_FALL_SPEED, this.vy + PHYSICS.GRAVITY * dt);
+      this.simulationVy = Math.min(PHYSICS.MAX_FALL_SPEED, this.simulationVy + PHYSICS.GRAVITY * dt);
     } else {
-      this.vy = 0;
+      this.simulationVy = 0;
     }
-    this.x += this.vx * dt;
-    this.y += this.vy * dt;
+    this.simulationX += this.simulationVx * dt;
+    this.simulationY += this.simulationVy * dt;
+  }
+
+  private setAuthoritative(authoritative: PlayerSnapshot): void {
+    this.simulationX = authoritative.x;
+    this.simulationY = authoritative.y;
+    this.simulationVx = authoritative.velocityX;
+    this.simulationVy = authoritative.velocityY;
+    this.correctionX = 0;
+    this.correctionY = 0;
   }
 }

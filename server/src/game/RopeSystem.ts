@@ -157,9 +157,19 @@ export class RopeConstraintSimple {
         Matter.Body.setVelocity(b.body, { x: b.body.velocity.x + bnx * dv, y: b.body.velocity.y + bny * dv });
       }
       if (active && pathDistance > PHYSICS.ROPE_MAX_LENGTH) {
-        const excess = Math.min(10, (pathDistance - PHYSICS.ROPE_MAX_LENGTH) * 0.18);
-        Matter.Body.translate(a.body, { x: anx * excess * 0.5, y: any * excess * 0.5 });
-        Matter.Body.translate(b.body, { x: bnx * excess * 0.5, y: bny * excess * 0.5 });
+        // Correct excessive stretch through velocity instead of teleporting
+        // bodies. Direct position changes can tunnel through platform edges.
+        const excess = pathDistance - PHYSICS.ROPE_MAX_LENGTH;
+        const correctionSpeed = Math.min(PHYSICS.MAX_RUN_SPEED, excess * 12);
+        const correctionDelta = correctionSpeed * dt * 0.5;
+        Matter.Body.setVelocity(a.body, {
+          x: a.body.velocity.x + anx * correctionDelta,
+          y: a.body.velocity.y + any * correctionDelta,
+        });
+        Matter.Body.setVelocity(b.body, {
+          x: b.body.velocity.x + bnx * correctionDelta,
+          y: b.body.velocity.y + bny * correctionDelta,
+        });
       }
       result.push({ a: a.id, b: b.id, distance: pathDistance, tension, active, points });
     }

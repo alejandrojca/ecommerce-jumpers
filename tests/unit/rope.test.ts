@@ -22,14 +22,15 @@ describe("RopeConstraintSimple", () => {
     expect(result[0]!.tension).toBeLessThanOrEqual(PHYSICS.ROPE_MAX_FORCE);
   });
 
-  it("reduces a separation beyond the maximum without NaN", () => {
+  it("corrects excessive separation through velocity without teleporting", () => {
     const pair = members(500);
+    const initialA = { ...pair[0]!.body.position };
+    const initialB = { ...pair[1]!.body.position };
     new RopeConstraintSimple().solve(pair, 1 / 60);
-    const distance = Math.hypot(
-      pair[1]!.body.position.x - pair[0]!.body.position.x,
-      pair[1]!.body.position.y - pair[0]!.body.position.y
-    );
-    expect(distance).toBeLessThan(500);
+    expect(pair[0]!.body.position).toEqual(initialA);
+    expect(pair[1]!.body.position).toEqual(initialB);
+    expect(pair[0]!.body.velocity.x).toBeGreaterThan(0);
+    expect(pair[1]!.body.velocity.x).toBeLessThan(0);
     expect(Number.isFinite(pair[0]!.body.velocity.x)).toBe(true);
   });
 

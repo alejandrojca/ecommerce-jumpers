@@ -22,6 +22,7 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
 const rooms = new RoomManager(io);
 
 io.on("connection", (socket) => {
+  socket.on("net:ping", (_clientTime, reply) => reply(Date.now()));
   socket.on("room:create", (raw, reply) => {
     const parsed = joinSchema.safeParse(raw);
     if (!parsed.success) return reply({ ok: false, error: "Nombre o color inválido." });

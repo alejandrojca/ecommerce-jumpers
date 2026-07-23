@@ -129,9 +129,10 @@ export class ServerGame {
 
   step(): void {
     const dt = 1 / NETWORK.SERVER_TICK_RATE;
+    const substeps = Math.max(1, PHYSICS.PHYSICS_SUBSTEPS);
+    const substepDt = dt / substeps;
     const now = Date.now();
     this.tick++;
-    this.moveLift(dt);
     const anchorLoads = calculateAnchorLoads(
       [...this.players.values()].map((player) => ({ id: player.id, hanging: player.voidLocked }))
     );
@@ -139,17 +140,20 @@ export class ServerGame {
       player.supportedHangingPlayers = anchorLoads.get(player.id) ?? 0;
     }
     for (const p of this.players.values()) this.updatePlayer(p, now, dt);
-    this.ropes = this.rope.solve(
-      [...this.players.values()].map((p) => ({ id: p.id, body: p.body, active: p.deadUntil <= now })),
-      dt,
-      this.platforms.map((platform) => ({
-        minX: platform.bounds.min.x,
-        minY: platform.bounds.min.y,
-        maxX: platform.bounds.max.x,
-        maxY: platform.bounds.max.y,
-      }))
-    );
-    Matter.Engine.update(this.engine, 1000 / NETWORK.SERVER_TICK_RATE);
+    const ropeMembers = [...this.players.values()].map((p) => ({
+      id: p.id, body: p.body, active: p.deadUntil <= now
+    }));
+    const ropeObstacles = this.platforms.map((platform) => ({
+      minX: platform.bounds.min.x,
+      minY: platform.bounds.min.y,
+      maxX: platform.bounds.max.x,
+      maxY: platform.bounds.max.y,
+    }));
+    for (let substep = 0; substep < substeps; substep++) {
+      this.moveLift(substepDt);
+      this.ropes = this.rope.solve(ropeMembers, substepDt, ropeObstacles);
+      Matter.Engine.update(this.engine, (1000 / NETWORK.SERVER_TICK_RATE) / substeps);
+    }
     for (const p of this.players.values()) this.postPhysics(p, now);
     this.updateTeamRespawn(now);
   }

@@ -55,4 +55,13 @@ describe("ClientPrediction", () => {
     expect(prediction.x).toBe(100);
     expect(prediction.vy).toBeGreaterThan(0);
   });
+
+  it("replays each pending input only once during reconciliation", () => {
+    const prediction = new ClientPrediction();
+    prediction.reconcile(player());
+    prediction.predict({ ...input(1), right: true }, 1 / 60);
+    const before = prediction.x;
+    prediction.reconcile(player({ lastProcessedInput: 0 }));
+    expect(prediction.x).toBeCloseTo(before, 5);
+  });
 });

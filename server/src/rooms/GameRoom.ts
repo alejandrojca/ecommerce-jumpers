@@ -23,6 +23,8 @@ export class GameRoom {
   private game?: ServerGame;
   private simulationTimer?: NodeJS.Timeout;
   private snapshotTimer?: NodeJS.Timeout;
+  private simulationAccumulator = 0;
+  private lastSimulationTime = 0;
 
   constructor(code: string, private readonly io: IO, private readonly onEmpty: () => void) {
     this.code = code;
@@ -111,7 +113,21 @@ export class GameRoom {
   }
 
   private startSimulation(): void {
-    this.simulationTimer = setInterval(() => this.game?.step(), 1000 / NETWORK.SERVER_TICK_RATE);
+    const stepMs = 1000 / NETWORK.SERVER_TICK_RATE;
+    this.simulationAccumulator = 0;
+    this.lastSimulationTime = performance.now();
+    this.simulationTimer = setInterval(() => {
+      const now = performance.now();
+      this.simulationAccumulator += Math.min(250, now - this.lastSimulationTime);
+      this.lastSimulationTime = now;
+      let steps = 0;
+      while (this.simulationAccumulator >= stepMs && steps < 5) {
+        this.game?.step();
+        this.simulationAccumulator -= stepMs;
+        steps++;
+      }
+      if (steps === 5) this.simulationAccumulator = 0;
+    }, Math.max(1, stepMs / 2));
     this.snapshotTimer = setInterval(() => {
       const snapshot = this.game?.snapshot();
       if (!snapshot) return;
@@ -179,6 +195,7 @@ export class GameRoom {
     if (this.simulationTimer) clearInterval(this.simulationTimer);
     if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     this.simulationTimer = this.snapshotTimer = undefined;
+    this.simulationAccumulator = 0;
   }
 
   private transferLeadership(): void {

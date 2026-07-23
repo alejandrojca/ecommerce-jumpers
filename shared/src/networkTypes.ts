@@ -15,6 +15,7 @@ export interface ClientToServerEvents {
   "room:ready": (ready: boolean) => void;
   "room:color": (color: number) => void;
   "room:start": (reply: (result: ActionReply) => void) => void;
+  "net:ping": (clientTime: number, reply: (serverTime: number) => void) => void;
   "game:input": (input: PlayerInput) => void;
   "game:restart": () => void;
   "game:exitToLobby": (reply: (result: ActionReply) => void) => void;

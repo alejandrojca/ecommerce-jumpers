@@ -17,8 +17,9 @@ export class GameScene extends Phaser.Scene {
   private predictionError = 0;
   private accumulator = 0;
   private sentThisSecond = 0;
-  private snapshotCount = 0;
   private statWindow = performance.now();
+  private rttMs = 0;
+  private pingTimer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly network: SocketClient, private readonly debugElement: HTMLElement) {
     super("GameScene");
@@ -31,6 +32,9 @@ export class GameScene extends Phaser.Scene {
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
     this.network.socket.on("game:snapshot", this.onSnapshot);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.onShutdown);
+    this.measureRtt();
+    this.pingTimer = setInterval(() => this.measureRtt(), 2000);
   }
 
   update(_time: number, deltaMs: number): void {
@@ -64,7 +68,6 @@ export class GameScene extends Phaser.Scene {
   private onSnapshot = (snapshot: GameSnapshot): void => {
     this.latest = snapshot;
     this.snapshots.push(snapshot);
-    this.snapshotCount++;
     const local = snapshot.players.find((p) => p.id === this.network.playerId);
     if (local) this.predictionError = this.prediction.reconcile(local);
   };
@@ -76,18 +79,32 @@ export class GameScene extends Phaser.Scene {
     g.fillStyle(0x1b2945, 0.55);
     for (let x = 0; x < 2200; x += 90) g.fillCircle(x, 140 + Math.sin(x * 0.01) * 70, 2);
     for (const object of snapshot.objects) {
-      if (object.kind === "platform") {
-        const moving = object.id.startsWith("moving:");
+      const rendered = this.snapshots.sampleObject(object.id) ?? object;
+      if (rendered.kind === "platform") {
+        const moving = rendered.id.startsWith("moving:");
         g.fillStyle(moving ? 0x71a7ff : 0x2d3959);
-        g.fillRoundedRect(object.x - object.width / 2, object.y - object.height / 2, object.width, object.height, 6);
+        g.fillRoundedRect(
+          rendered.x - rendered.width / 2, rendered.y - rendered.height / 2,
+          rendered.width, rendered.height, 6
+        );
         g.lineStyle(2, moving ? 0xa8c8ff : 0x435276, 0.8)
-          .strokeRoundedRect(object.x - object.width / 2, object.y - object.height / 2, object.width, object.height, 6);
+          .strokeRoundedRect(
+            rendered.x - rendered.width / 2, rendered.y - rendered.height / 2,
+            rendered.width, rendered.height, 6
+          );
       } else {
-        g.fillStyle(0xc68954).fillRoundedRect(object.x - object.width / 2, object.y - object.height / 2, object.width, object.height, 7);
-        g.lineStyle(3, 0x8d5c39).strokeRoundedRect(object.x - object.width / 2, object.y - object.height / 2, object.width, object.height, 7);
+        g.fillStyle(0xc68954).fillRoundedRect(
+          rendered.x - rendered.width / 2, rendered.y - rendered.height / 2,
+          rendered.width, rendered.height, 7
+        );
+        g.lineStyle(3, 0x8d5c39).strokeRoundedRect(
+          rendered.x - rendered.width / 2, rendered.y - rendered.height / 2,
+          rendered.width, rendered.height, 7
+        );
       }
     }
-    for (const rope of snapshot.ropes) {
+    for (const latestRope of snapshot.ropes) {
+      const rope = this.snapshots.sampleRope(latestRope.a, latestRope.b) ?? latestRope;
       const a = this.renderPosition(rope.a);
       const b = this.renderPosition(rope.b);
       if (!a || !b) continue;
@@ -159,14 +176,16 @@ export class GameScene extends Phaser.Scene {
     if (now - this.statWindow > 1000) {
       this.statWindow = now;
       this.sentThisSecond = 0;
-      this.snapshotCount = 0;
     }
     const local = this.latest!.players.find((p) => p.id === this.network.playerId);
     const rope = this.latest!.ropes.find((r) => r.a === this.network.playerId || r.b === this.network.playerId);
     this.debugElement.textContent = [
       `FPS             ${Math.round(this.game.loop.actualFps)}`,
+      `RTT             ${this.rttMs.toFixed(0)} ms`,
       `server tick     ${this.latest!.serverTick}`,
-      `snapshots/s     ${this.snapshotCount}`,
+      `inputs/s        ${this.sentThisSecond}`,
+      `snapshots/s     ${this.snapshots.measuredRate.toFixed(1)}`,
+      `snapshot jitter ${this.snapshots.jitterMs.toFixed(1)} ms`,
       `pending inputs  ${this.prediction.pendingCount}`,
       `prediction err  ${this.predictionError.toFixed(1)} px`,
       `authoritative   ${local ? `${local.x.toFixed(1)}, ${local.y.toFixed(1)}` : "-"}`,
@@ -191,4 +210,20 @@ export class GameScene extends Phaser.Scene {
     if (event.code === "KeyR") this.network.socket.emit("game:restart");
   };
   private onKeyUp = (event: KeyboardEvent): void => { this.pressed.delete(event.code); };
+
+  private measureRtt(): void {
+    if (!this.network.socket.connected) return;
+    const startedAt = performance.now();
+    this.network.socket.timeout(3000).emit("net:ping", Date.now(), (error) => {
+      if (!error) this.rttMs = performance.now() - startedAt;
+    });
+  }
+
+  private onShutdown = (): void => {
+    window.removeEventListener("keydown", this.onKeyDown);
+    window.removeEventListener("keyup", this.onKeyUp);
+    this.network.socket.off("game:snapshot", this.onSnapshot);
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = undefined;
+  };
 }
