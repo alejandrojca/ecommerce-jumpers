@@ -3,7 +3,7 @@ services:
     name: ecommerce-jumpers-server
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build -w @tetherbound/shared && npm run build -w @tetherbound/server
+    buildCommand: npm ci --include=dev && npm run build -w @tetherbound/shared && npm run build -w @tetherbound/server
     startCommand: npm run start -w @tetherbound/server
     healthCheckPath: /health
     envVars:
