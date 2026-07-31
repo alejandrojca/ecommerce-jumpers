@@ -23,7 +23,9 @@ export class ClientPrediction {
   private initialized = false;
   private grounded = false;
   private movementLocked = false;
+  private exited = false;
   private supportId?: string;
+  private jumpStartFeetY?: number;
   private surfaces: PredictiveSurface[] = [];
 
   get x(): number { return this.simulationX + this.correctionX; }
@@ -32,7 +34,7 @@ export class ClientPrediction {
   get vy(): number { return this.simulationVy; }
 
   predict(input: PlayerInput, dt: number): void {
-    if (!this.initialized) return;
+    if (!this.initialized || this.exited) return;
     this.pending.push({ input, dt });
     this.integrate(input, dt);
     const smoothing = Math.pow(0.78, dt * 60);
@@ -47,7 +49,8 @@ export class ClientPrediction {
       this.grounded = authoritative.grounded;
       this.supportId = authoritative.support?.id;
       this.snapToAuthoritativeSupport(authoritative);
-      this.movementLocked = authoritative.state === "Hanging";
+      this.movementLocked = authoritative.state === "Hanging" || authoritative.state === "AtExit";
+      this.exited = authoritative.state === "AtExit";
       this.initialized = true;
       return 0;
     }
@@ -58,7 +61,9 @@ export class ClientPrediction {
     this.grounded = authoritative.grounded;
     this.supportId = authoritative.support?.id;
     this.snapToAuthoritativeSupport(authoritative);
-    this.movementLocked = authoritative.state === "Hanging";
+    this.movementLocked = authoritative.state === "Hanging" || authoritative.state === "AtExit";
+    this.exited = authoritative.state === "AtExit";
+    if (authoritative.state === "AtExit") this.pending = [];
     for (const pending of this.pending) this.integrate(pending.input, pending.dt);
     const error = Math.hypot(this.simulationX - previousX, this.simulationY - previousY);
     if (error > NETWORK.HARD_CORRECTION_DISTANCE || this.movementLocked) {
@@ -98,17 +103,30 @@ export class ClientPrediction {
     }
     if (!this.movementLocked && input.jumpPressed && this.grounded) {
       this.simulationVy = PHYSICS.JUMP_VELOCITY;
+      this.jumpStartFeetY = this.simulationY + PHYSICS.PLAYER_HEIGHT / 2;
       this.grounded = false;
       this.supportId = undefined;
     }
+    const velocityBeforeGravity = this.simulationVy;
     if (!this.grounded) {
-      this.simulationVy = Math.min(PHYSICS.MAX_FALL_SPEED, this.simulationVy + PHYSICS.GRAVITY * dt);
+      this.simulationVy = Math.min(PHYSICS.MAX_FALL_SPEED, velocityBeforeGravity + PHYSICS.GRAVITY * dt);
     } else {
       this.simulationVy = 0;
     }
     const previousBottom = this.simulationY + PHYSICS.PLAYER_HEIGHT / 2;
     const nextX = this.simulationX + this.simulationVx * dt;
-    let nextY = this.simulationY + this.simulationVy * dt;
+    let nextY = this.grounded
+      ? this.simulationY
+      : this.simulationY + velocityBeforeGravity * dt + PHYSICS.GRAVITY * dt * dt / 2;
+    if (this.jumpStartFeetY !== undefined) {
+      const apexY = this.jumpStartFeetY - PHYSICS.MAX_JUMP_HEIGHT - PHYSICS.PLAYER_HEIGHT / 2;
+      // Resolve the analytical apex rather than accepting a frame-sampled one.
+      if (velocityBeforeGravity < 0 && this.simulationVy >= 0) nextY = apexY;
+      if (nextY < apexY) {
+        nextY = apexY;
+        if (this.simulationVy < 0) this.simulationVy = 0;
+      }
+    }
     if (!this.grounded && this.simulationVy >= 0) {
       const nextBottom = nextY + PHYSICS.PLAYER_HEIGHT / 2;
       const landing = this.findLandingSurface(previousBottom, nextBottom, nextX);
@@ -117,6 +135,7 @@ export class ClientPrediction {
         this.simulationVy = landing.velocityY;
         this.grounded = true;
         this.supportId = landing.id;
+        this.jumpStartFeetY = undefined;
       }
     }
     this.simulationX = nextX;

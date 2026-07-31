@@ -23,4 +23,15 @@ describe("VictorySystem", () => {
     expect(results.map((result) => result.playerId)).toEqual(["slow", "middle", "fast"]);
     expect(results[0]!.timeMs).toBe(12_987);
   });
+
+  it("puts unfinished players first and resolves ties by name then id", () => {
+    const players = [
+      { id: "z", name: "Zoe", color: 1 },
+      { id: "b", name: "Ana", color: 2 },
+      { id: "a", name: "Ana", color: 3 },
+      { id: "done", name: "Leo", color: 4 },
+    ];
+    const results = buildVictoryResults(players, new Map([["done", 5_000]]));
+    expect(results.map((result) => result.playerId)).toEqual(["a", "b", "z", "done"]);
+  });
 });

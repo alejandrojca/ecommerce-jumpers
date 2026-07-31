@@ -13,7 +13,6 @@ export interface ClientToServerEvents {
   "room:create": (data: JoinRequest, reply: (result: RoomReply) => void) => void;
   "room:join": (data: JoinRequest & { code: string }, reply: (result: RoomReply) => void) => void;
   "room:ready": (ready: boolean) => void;
-  "room:color": (color: number) => void;
   "room:start": (reply: (result: ActionReply) => void) => void;
   "net:ping": (clientTime: number, reply: (serverTime: number) => void) => void;
   "game:input": (input: PlayerInput) => void;
@@ -28,6 +27,10 @@ export interface ServerToClientEvents {
   "game:started": () => void;
   "game:victory": (results: VictoryResult[]) => void;
 }
-export interface JoinRequest { name: string; color: number; reconnectToken?: string }
+export interface JoinRequest {
+  name?: string;
+  color?: number;
+  reconnectToken?: string;
+}
 export interface RoomReply { ok: boolean; error?: string; room?: RoomView; playerId?: string; reconnectToken?: string }
 export interface ActionReply { ok: boolean; error?: string }

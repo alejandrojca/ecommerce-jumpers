@@ -9,9 +9,13 @@ export const NETWORK = {
   MAX_MESSAGE_BYTES: 1024,
 } as const;
 
+const PLAYER_COLLIDER_HEIGHT = 42;
+const GRAVITY = 1400;
+const MAX_JUMP_HEIGHT = PLAYER_COLLIDER_HEIGHT * 3;
+
 export const PHYSICS = {
   PLAYER_WIDTH: 32,
-  PLAYER_HEIGHT: 42,
+  PLAYER_HEIGHT: PLAYER_COLLIDER_HEIGHT,
   GROUND_ACCELERATION: 1800,
   GROUND_DECELERATION: 2200,
   AIR_ACCELERATION: 900,
@@ -19,9 +23,17 @@ export const PHYSICS = {
   MAX_AIR_SPEED: 230,
   GROUND_FRICTION: 0.82,
   AIR_DRAG: 0.99,
-  JUMP_VELOCITY: -470,
+  // Horizontal movement/deceleration is controller-driven. A non-zero Matter
+  // friction here makes vertical walls apply tangential forces and can pin a
+  // player in mid-air while they keep pressing into the wall.
+  PLAYER_CONTACT_FRICTION: 0,
+  PLAYER_STATIC_FRICTION: 0,
+  // Derived from the real collider, not from its rendered sprite.
+  MAX_OBSTACLE_HEIGHT: PLAYER_COLLIDER_HEIGHT,
+  MAX_JUMP_HEIGHT,
+  JUMP_VELOCITY: -Math.sqrt(2 * GRAVITY * MAX_JUMP_HEIGHT),
   JUMP_CUT_MULTIPLIER: 0.45,
-  GRAVITY: 1400,
+  GRAVITY,
   MAX_FALL_SPEED: 700,
   COYOTE_TIME_MS: 100,
   JUMP_BUFFER_MS: 120,
@@ -42,6 +54,7 @@ export const PHYSICS = {
   ROPE_SEGMENTS: 8,
   RESPAWN_DELAY_MS: 1200,
   INVULNERABILITY_AFTER_RESPAWN_MS: 800,
+  PLAYER_COLLISION_COOLDOWN_MS: 1500,
 } as const;
 
 export const COLORS = [

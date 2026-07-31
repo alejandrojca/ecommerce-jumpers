@@ -35,7 +35,7 @@ export class SocketClient {
     const raw = localStorage.getItem("tetherbound-session");
     if (!raw) return;
     try {
-      const saved = JSON.parse(raw) as { code: string; name: string; color: number; reconnectToken: string };
+      const saved = JSON.parse(raw) as { code: string; reconnectToken: string };
       this.reconnectingSession = true;
       void this.join(saved.code, saved).finally(() => {
         this.reconnectingSession = false;

@@ -19,17 +19,19 @@ export class RoomManager {
     do code = Math.random().toString(36).slice(2, 7).toUpperCase(); while (this.rooms.has(code));
     const room = new GameRoom(code, this.io, () => this.rooms.delete(code));
     this.rooms.set(code, room);
-    const member = room.createMember(name, color, socket.id);
+    const member = room.createMember(socket.id, name, color);
     socket.join(code);
     this.sessions.set(socket.id, { room, playerId: member.id });
     return { room, playerId: member.id, token: member.reconnectToken };
   }
 
-  join(socket: GameSocket, code: string, name: string, color: number, reconnectToken?: string): { room: GameRoom; playerId: string; token: string } {
+  join(socket: GameSocket, code: string, identity: { name?: string; color?: number; reconnectToken?: string }): { room: GameRoom; playerId: string; token: string } {
     const room = this.rooms.get(code.toUpperCase());
     if (!room) throw new Error("Sala inexistente.");
     this.leaveCurrent(socket.id);
-    const member = reconnectToken ? room.reconnect(reconnectToken, socket.id) : room.createMember(name, color, socket.id);
+    const member = identity.reconnectToken
+      ? room.reconnect(identity.reconnectToken, socket.id)
+      : room.createMember(socket.id, identity.name!, identity.color!);
     if (!member) throw new Error("La reconexión ya no es válida.");
     socket.join(room.code);
     this.sessions.set(socket.id, { room, playerId: member.id });

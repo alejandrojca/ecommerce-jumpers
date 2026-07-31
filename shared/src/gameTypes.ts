@@ -33,6 +33,8 @@ export interface PlayerSnapshot {
   connected: boolean;
   lastProcessedInput: number;
   supportedHangingPlayers: number;
+  /** Server timestamp at which the player irreversibly entered the open exit. */
+  exitedAt?: number;
   support?: {
     id: string;
     topY: number;
@@ -73,6 +75,8 @@ export interface GameSnapshot {
   serverTime: number;
   players: PlayerSnapshot[];
   ropes: RopeSnapshot[];
+  /** Authoritative, team-wide collision charge. */
+  teamCharge: { current: number; max: number };
   objects: ObjectSnapshot[];
   keyState: { collected: boolean; holderId?: string; x: number; y: number };
   doorState: { open: boolean; inside: number; required: number; x: number; y: number };

@@ -25,9 +25,9 @@ io.on("connection", (socket) => {
   socket.on("net:ping", (_clientTime, reply) => reply(Date.now()));
   socket.on("room:create", (raw, reply) => {
     const parsed = joinSchema.safeParse(raw);
-    if (!parsed.success) return reply({ ok: false, error: "Nombre o color inválido." });
+    if (!parsed.success) return reply({ ok: false, error: "Datos inválidos." });
     try {
-      const result = rooms.create(socket, parsed.data.name, parsed.data.color);
+      const result = rooms.create(socket, parsed.data.name!, parsed.data.color!);
       reply({ ok: true, room: result.room.view, playerId: result.playerId, reconnectToken: result.token });
     } catch (error) {
       reply({ ok: false, error: error instanceof Error ? error.message : "No se pudo crear la sala." });
@@ -38,7 +38,7 @@ io.on("connection", (socket) => {
     const parsed = joinSchema.safeParse(join);
     if (!parsed.success || typeof code !== "string" || code.length > 8) return reply({ ok: false, error: "Datos inválidos." });
     try {
-      const result = rooms.join(socket, code, parsed.data.name, parsed.data.color, parsed.data.reconnectToken);
+      const result = rooms.join(socket, code, parsed.data);
       reply({ ok: true, room: result.room.view, playerId: result.playerId, reconnectToken: result.token });
     } catch (error) {
       reply({ ok: false, error: error instanceof Error ? error.message : "No se pudo entrar." });
@@ -47,10 +47,6 @@ io.on("connection", (socket) => {
   socket.on("room:ready", (ready) => {
     const session = rooms.session(socket.id);
     if (session && typeof ready === "boolean") session.room.setReady(session.playerId, ready);
-  });
-  socket.on("room:color", (color) => {
-    const session = rooms.session(socket.id);
-    if (session) session.room.setColor(session.playerId, color);
   });
   socket.on("room:start", (reply) => {
     const session = rooms.session(socket.id);

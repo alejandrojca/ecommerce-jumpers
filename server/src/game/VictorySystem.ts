@@ -21,12 +21,19 @@ export function buildVictoryResults(
   players: VictoryPlayer[],
   exitTimes: ReadonlyMap<string, number>
 ): VictoryResult[] {
-  return players
+  const results = players
     .map((player) => ({
       playerId: player.id,
       name: player.name,
       color: player.color,
       timeMs: exitTimes.get(player.id) ?? 0,
-    }))
-    .sort((a, b) => b.timeMs - a.timeMs || a.name.localeCompare(b.name));
+    }));
+  return results.sort((a, b) => {
+    const aFinished = exitTimes.has(a.playerId);
+    const bFinished = exitTimes.has(b.playerId);
+    if (aFinished !== bFinished) return aFinished ? 1 : -1;
+    return b.timeMs - a.timeMs
+      || a.name.localeCompare(b.name, "es")
+      || a.playerId.localeCompare(b.playerId);
+  });
 }

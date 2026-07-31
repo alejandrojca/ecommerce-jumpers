@@ -21,13 +21,34 @@ const toast = document.querySelector<HTMLElement>("#toast")!;
 const mission = document.querySelector<HTMLElement>("#mission")!;
 const network = new SocketClient();
 let room: RoomView | undefined;
-let chosenColor: number = COLORS[0];
 let notice = "";
 let gameStarted = false;
-let draftName = "";
 let draftRoomCode = "";
+let draftName = "";
+let draftColor: number = COLORS[0];
 
 const escape = (value: string) => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
+const identityFields = () => `
+  <label class="field">Nombre
+    <input id="player-name" maxlength="18" autocomplete="nickname" value="${escape(draftName)}" />
+  </label>
+  <fieldset class="color-picker"><legend>Color</legend>
+    ${COLORS.map((color) => `<button type="button" class="color-choice ${color === draftColor ? "selected" : ""}" data-color="${color}" aria-label="Elegir color" style="--color:#${color.toString(16).padStart(6, "0")}"></button>`).join("")}
+  </fieldset>`;
+
+function bindIdentityFields(): void {
+  const name = shell.querySelector<HTMLInputElement>("#player-name")!;
+  name.addEventListener("input", () => { draftName = name.value; });
+  shell.querySelectorAll<HTMLButtonElement>(".color-choice").forEach((choice) => {
+    choice.onclick = () => {
+      draftColor = Number(choice.dataset.color);
+      shell.querySelectorAll(".color-choice").forEach((item) => item.classList.toggle("selected", item === choice));
+    };
+  });
+}
+
+const identityRequest = () => ({ name: draftName.trim(), color: draftColor });
 
 function renderMenu(): void {
   shell.hidden = false;
@@ -37,8 +58,7 @@ function renderMenu(): void {
       <div class="eyebrow">Cooperación bajo tensión</div>
       <h1>Ecommerce<br>jumpers</h1>
       <p class="subtitle">Un equipo, una cuerda y ningún héroe solitario. Coordinen saltos, rescates y empujes para que todos crucen.</p>
-      <label class="field">Tu nombre <input id="name" maxlength="18" autocomplete="nickname" placeholder="Explorador" value="${escape(draftName)}" /></label>
-      <div class="field">Tu color <div class="colors">${COLORS.map((color) => `<button class="color ${color === chosenColor ? "selected" : ""}" data-color="${color}" style="--color:#${color.toString(16).padStart(6, "0")}" aria-label="Elegir color"></button>`).join("")}</div></div>
+      ${identityFields()}
       <div class="actions">
         <button class="button" id="create">Crear sala</button>
         <button class="button secondary" id="join">Unirme</button>
@@ -46,26 +66,17 @@ function renderMenu(): void {
       <div class="notice">${escape(notice)}</div>
       <div class="controls">Teclado: A/D o flechas · Saltar: W, ↑ o espacio · Gamepad compatible</div>
     </section>`;
-  shell.querySelectorAll<HTMLElement>(".color").forEach((button) => button.onclick = () => {
-    chosenColor = Number(button.dataset.color);
-    shell.querySelectorAll<HTMLElement>(".color").forEach((colorButton) => {
-      colorButton.classList.toggle("selected", Number(colorButton.dataset.color) === chosenColor);
-    });
-  });
-  const nameInput = shell.querySelector<HTMLInputElement>("#name")!;
-  nameInput.addEventListener("input", () => { draftName = nameInput.value; });
+  bindIdentityFields();
   shell.querySelector<HTMLButtonElement>("#create")!.onclick = async () => {
-    draftName = (nameInput.value || "Explorador").trim();
-    const reply = await network.create({ name: draftName, color: chosenColor });
+    const reply = await network.create(identityRequest());
     if (!reply.ok) {
       notice = reply.error ?? "No se pudo conectar.";
       renderMenu();
       return;
     }
-    finishRoomEntry(reply, draftName);
+    finishRoomEntry(reply);
   };
   shell.querySelector<HTMLButtonElement>("#join")!.onclick = () => {
-    draftName = (nameInput.value || "Explorador").trim();
     notice = "";
     renderJoinPrompt();
   };
@@ -79,6 +90,7 @@ function renderJoinPrompt(): void {
       <div class="eyebrow">Ecommerce jumpers</div>
       <h2>Unirse a una sala</h2>
       <p class="subtitle">Ingresa el código que te compartió el líder del equipo.</p>
+      ${identityFields()}
       <label class="field">Código de sala
         <input id="join-code" maxlength="5" placeholder="ABCDE" autocapitalize="characters" autocomplete="off" value="${escape(draftRoomCode)}" />
       </label>
@@ -88,6 +100,7 @@ function renderJoinPrompt(): void {
       </div>
       <div class="notice">${escape(notice)}</div>
     </section>`;
+  bindIdentityFields();
   const codeInput = shell.querySelector<HTMLInputElement>("#join-code")!;
   codeInput.focus();
   codeInput.addEventListener("input", () => {
@@ -100,14 +113,13 @@ function renderJoinPrompt(): void {
   };
   const join = async () => {
     draftRoomCode = codeInput.value.trim().toUpperCase();
-    const name = draftName || "Explorador";
-    const reply = await network.join(draftRoomCode, { name, color: chosenColor });
+    const reply = await network.join(draftRoomCode, identityRequest());
     if (!reply.ok) {
       notice = reply.error ?? "No se pudo entrar a la sala.";
       renderJoinPrompt();
       return;
     }
-    finishRoomEntry(reply, name);
+    finishRoomEntry(reply);
   };
   shell.querySelector<HTMLButtonElement>("#confirm-join")!.onclick = () => void join();
   codeInput.addEventListener("keydown", (event) => {
@@ -115,12 +127,10 @@ function renderJoinPrompt(): void {
   });
 }
 
-function finishRoomEntry(reply: RoomReply, name: string): void {
+function finishRoomEntry(reply: RoomReply): void {
   if (reply.reconnectToken && reply.room) {
     localStorage.setItem("tetherbound-session", JSON.stringify({
       code: reply.room.code,
-      name,
-      color: chosenColor,
       reconnectToken: reply.reconnectToken
     }));
   }

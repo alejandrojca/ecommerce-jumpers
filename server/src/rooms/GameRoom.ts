@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { Server } from "socket.io";
 import {
-  NETWORK, ROOM_MAX_PLAYERS, ROOM_MIN_PLAYERS, type ClientToServerEvents,
+  COLORS, NETWORK, ROOM_MAX_PLAYERS, ROOM_MIN_PLAYERS, type ClientToServerEvents,
   type LobbyPlayer, type MatchState, type PlayerInput, type RoomView, type ServerToClientEvents
 } from "@tetherbound/shared";
 import { ServerGame } from "../game/ServerGame.js";
@@ -34,9 +34,15 @@ export class GameRoom {
     return { code: this.code, state: this.state, players: [...this.members.values()].map(this.publicMember) };
   }
 
-  createMember(name: string, color: number, socketId: string): Member {
+  createMember(socketId: string, name: string, color: number): Member {
     if (this.state !== "lobby") throw new Error("La partida ya comenzó.");
     if (this.members.size >= ROOM_MAX_PLAYERS) throw new Error("La sala está completa.");
+    name = name.trim();
+    if (!name || name.length > 18) throw new Error("El nombre debe tener entre 1 y 18 caracteres.");
+    if (!COLORS.includes(color as (typeof COLORS)[number])) throw new Error("El color elegido no es válido.");
+    if ([...this.members.values()].some((member) => member.color === color)) {
+      throw new Error("Ese color ya está en uso. Elegí otro.");
+    }
     const id = crypto.randomUUID();
     const member: Member = {
       id, name, color, ready: false, connected: true, leader: this.members.size === 0,
@@ -64,15 +70,7 @@ export class GameRoom {
     const member = this.members.get(id);
     if (member && this.state === "lobby") {
       member.ready = ready;
-      this.emitView();
-    }
-  }
-
-  setColor(id: string, color: number): void {
-    const member = this.members.get(id);
-    if (member && this.state === "lobby" && Number.isInteger(color) && color >= 0 && color <= 0xffffff) {
-      member.color = color;
-      this.emitView();
+      this.broadcast(ready ? `${member.name} está listo.` : `${member.name} dejó de estar listo.`);
     }
   }
 
