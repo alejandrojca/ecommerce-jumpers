@@ -37,4 +37,15 @@ describe("SnapshotBuffer", () => {
     expect(buffer.measuredRate).toBeCloseTo(20);
     expect(buffer.jitterMs).toBe(0);
   });
+
+  it("does not interpolate a remote player across a death teleport", () => {
+    const buffer = new SnapshotBuffer();
+    const alive = snapshot(1000, 500);
+    const dead = snapshot(1050, -200);
+    dead.players[0]!.state = "Dead";
+    buffer.push(alive, 1000);
+    buffer.push(dead, 1050);
+    expect(buffer.samplePlayer("p", 1100)?.x).toBe(-200);
+    expect(buffer.samplePlayer("p", 1100)?.state).toBe("Dead");
+  });
 });

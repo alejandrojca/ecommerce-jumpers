@@ -102,4 +102,39 @@ describe("ClientPrediction", () => {
     prediction.reconcile(grounded, world(grounded));
     expect(prediction.y).toBe(604);
   });
+
+  it("uses the same grounded acceleration and stopping law as the server", () => {
+    const prediction = new ClientPrediction();
+    prediction.reconcile(player());
+    prediction.predict({ ...input(1), right: true }, 1 / 60);
+    expect(prediction.vx).toBeCloseTo(30, 6);
+    prediction.predict(input(2), 1 / 60);
+    expect(prediction.vx).toBe(0);
+  });
+
+  it("predicts a horizontal platform collision instead of crossing it", () => {
+    const prediction = new ClientPrediction();
+    const local = player({ x: 80, y: 604, velocityX: 240 });
+    const snapshot = world(local);
+    snapshot.objects.push({
+      id: "platform:wall", kind: "platform", x: 102, y: 604,
+      width: 12, height: 100, velocityX: 0, velocityY: 0
+    });
+    prediction.reconcile(local, snapshot);
+    prediction.predict({ ...input(1), right: true }, 1 / 60);
+    expect(prediction.x).toBeLessThanOrEqual(80);
+    expect(prediction.vx).toBe(0);
+  });
+
+  it("keeps rendering continuous for a large active-play reconciliation", () => {
+    const prediction = new ClientPrediction();
+    prediction.reconcile(player({ x: 100 }));
+    const before = prediction.x;
+    const error = prediction.reconcile(player({ x: 210, lastProcessedInput: 1 }));
+    expect(error).toBeGreaterThan(80);
+    expect(prediction.x).toBeCloseTo(before, 6);
+    prediction.predict(input(2), 1 / 60);
+    expect(prediction.x).toBeGreaterThan(before);
+    expect(prediction.x).toBeLessThan(210);
+  });
 });

@@ -31,6 +31,13 @@ export class SnapshotBuffer {
     const a = older.players.find((p) => p.id === id);
     const b = newer.players.find((p) => p.id === id);
     if (!a || !b) return b ?? a;
+    // Death, respawn and exit reposition bodies authoritatively. Interpolating
+    // across those state boundaries renders a fake high-speed trip through the
+    // map, so transition snapshots are intentionally discontinuous.
+    if (a.state !== b.state && (
+      a.state === "Dead" || a.state === "Respawning" || a.state === "AtExit"
+      || b.state === "Dead" || b.state === "Respawning" || b.state === "AtExit"
+    )) return b;
     return { ...b, x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
   }
 

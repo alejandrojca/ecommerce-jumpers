@@ -72,7 +72,10 @@ describe("global jump and obstacle rules", () => {
     expect(landed).toBe(true);
     expect(prediction.y).toBeCloseTo(landingY, 5);
     expect(prediction.x).toBeGreaterThan(140);
-    expect(prediction.x).toBeLessThan(260);
+    // Landing is valid while the collider still overlaps the platform. With
+    // server-matched ground acceleration the center can advance slightly past
+    // the platform edge during the landing tick without falling off it.
+    expect(prediction.x - PHYSICS.PLAYER_WIDTH / 2).toBeLessThan(260);
   });
 
   it("limits maximum feet rise to approximately three collider heights", () => {

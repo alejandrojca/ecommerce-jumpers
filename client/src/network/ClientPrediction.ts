@@ -1,5 +1,5 @@
 import {
-  NETWORK, PHYSICS, type GameSnapshot, type PlayerInput, type PlayerSnapshot
+  PHYSICS, type GameSnapshot, type PlayerInput, type PlayerSnapshot
 } from "@tetherbound/shared";
 
 interface Predicted { input: PlayerInput; dt: number }
@@ -8,6 +8,7 @@ interface PredictiveSurface {
   minX: number;
   maxX: number;
   topY: number;
+  bottomY: number;
   velocityX: number;
   velocityY: number;
 }
@@ -24,6 +25,7 @@ export class ClientPrediction {
   private grounded = false;
   private movementLocked = false;
   private exited = false;
+  private authoritativeState?: PlayerSnapshot["state"];
   private supportId?: string;
   private jumpStartFeetY?: number;
   private surfaces: PredictiveSurface[] = [];
@@ -51,22 +53,32 @@ export class ClientPrediction {
       this.snapToAuthoritativeSupport(authoritative);
       this.movementLocked = authoritative.state === "Hanging" || authoritative.state === "AtExit";
       this.exited = authoritative.state === "AtExit";
+      this.authoritativeState = authoritative.state;
       this.initialized = true;
       return 0;
     }
     const previousX = this.x;
     const previousY = this.y;
     this.pending = this.pending.filter((p) => p.input.sequence > authoritative.lastProcessedInput);
+    const previousState = this.authoritativeState;
     this.setAuthoritative(authoritative);
     this.grounded = authoritative.grounded;
     this.supportId = authoritative.support?.id;
     this.snapToAuthoritativeSupport(authoritative);
     this.movementLocked = authoritative.state === "Hanging" || authoritative.state === "AtExit";
     this.exited = authoritative.state === "AtExit";
+    this.authoritativeState = authoritative.state;
     if (authoritative.state === "AtExit") this.pending = [];
     for (const pending of this.pending) this.integrate(pending.input, pending.dt);
     const error = Math.hypot(this.simulationX - previousX, this.simulationY - previousY);
-    if (error > NETWORK.HARD_CORRECTION_DISTANCE || this.movementLocked) {
+    // Gameplay divergence (for example, the server resolving a wall contact)
+    // must not become a visual teleport. The authoritative simulation is
+    // adopted immediately and only its render offset is decayed. True world
+    // transitions still snap; smoothing a respawn/death/exit would draw a
+    // character travelling through the level.
+    const semanticTeleport = previousState !== authoritative.state
+      && (authoritative.state === "Dead" || authoritative.state === "Respawning" || authoritative.state === "AtExit");
+    if (semanticTeleport || this.movementLocked) {
       this.correctionX = 0;
       this.correctionY = 0;
     } else {
@@ -94,12 +106,16 @@ export class ClientPrediction {
     }
     const direction = this.movementLocked ? 0 : Number(input.right) - Number(input.left);
     if (direction) {
+      const acceleration = this.grounded ? PHYSICS.GROUND_ACCELERATION : PHYSICS.AIR_ACCELERATION;
       this.simulationVx = Math.max(
         -PHYSICS.MAX_RUN_SPEED,
-        Math.min(PHYSICS.MAX_RUN_SPEED, this.simulationVx + direction * PHYSICS.AIR_ACCELERATION * dt)
+        Math.min(PHYSICS.MAX_RUN_SPEED, this.simulationVx + direction * acceleration * dt)
       );
     } else {
-      this.simulationVx *= Math.pow(PHYSICS.AIR_DRAG, dt * 60);
+      const deceleration = PHYSICS.GROUND_DECELERATION * dt;
+      this.simulationVx = Math.abs(this.simulationVx) <= deceleration
+        ? 0
+        : this.simulationVx - Math.sign(this.simulationVx) * deceleration;
     }
     if (!this.movementLocked && input.jumpPressed && this.grounded) {
       this.simulationVy = PHYSICS.JUMP_VELOCITY;
@@ -114,7 +130,14 @@ export class ClientPrediction {
       this.simulationVy = 0;
     }
     const previousBottom = this.simulationY + PHYSICS.PLAYER_HEIGHT / 2;
-    const nextX = this.simulationX + this.simulationVx * dt;
+    let nextX = this.simulationX + this.simulationVx * dt;
+    const blocker = this.findHorizontalBlocker(this.simulationX, nextX, this.simulationY);
+    if (blocker) {
+      nextX = this.simulationVx > 0
+        ? blocker.minX - PHYSICS.PLAYER_WIDTH / 2
+        : blocker.maxX + PHYSICS.PLAYER_WIDTH / 2;
+      this.simulationVx = blocker.velocityX;
+    }
     let nextY = this.grounded
       ? this.simulationY
       : this.simulationY + velocityBeforeGravity * dt + PHYSICS.GRAVITY * dt * dt / 2;
@@ -158,6 +181,7 @@ export class ClientPrediction {
         minX: object.x - object.width / 2,
         maxX: object.x + object.width / 2,
         topY: object.y - object.height / 2,
+        bottomY: object.y + object.height / 2,
         velocityX: object.velocityX,
         velocityY: object.velocityY,
       })),
@@ -168,6 +192,7 @@ export class ClientPrediction {
           minX: player.x - PHYSICS.PLAYER_WIDTH / 2,
           maxX: player.x + PHYSICS.PLAYER_WIDTH / 2,
           topY: player.y - PHYSICS.PLAYER_HEIGHT / 2,
+          bottomY: player.y + PHYSICS.PLAYER_HEIGHT / 2,
           velocityX: player.velocityX,
           velocityY: player.velocityY,
         })),
@@ -203,5 +228,18 @@ export class ClientPrediction {
   private overlapsHorizontally(x: number, surface: PredictiveSurface): boolean {
     const halfWidth = PHYSICS.PLAYER_WIDTH / 2;
     return x + halfWidth > surface.minX + 2 && x - halfWidth < surface.maxX - 2;
+  }
+
+  private findHorizontalBlocker(fromX: number, toX: number, y: number): PredictiveSurface | undefined {
+    if (toX === fromX) return undefined;
+    const halfWidth = PHYSICS.PLAYER_WIDTH / 2;
+    const top = y - PHYSICS.PLAYER_HEIGHT / 2 + 3;
+    const bottom = y + PHYSICS.PLAYER_HEIGHT / 2 - 3;
+    return this.surfaces
+      .filter((surface) => bottom > surface.topY + 2 && top < surface.bottomY - 2)
+      .filter((surface) => toX > fromX
+        ? fromX + halfWidth <= surface.minX + 3 && toX + halfWidth >= surface.minX
+        : fromX - halfWidth >= surface.maxX - 3 && toX - halfWidth <= surface.maxX)
+      .sort((a, b) => toX > fromX ? a.minX - b.minX : b.maxX - a.maxX)[0];
   }
 }
