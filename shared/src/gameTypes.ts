@@ -1,3 +1,5 @@
+import type { EditableMapDefinition } from "./mapTypes.js";
+
 export type PlayerState =
   | "Idle" | "Running" | "Jumping" | "Falling" | "Hanging" | "BeingPulled"
   | "Pushing" | "Stacked" | "Stunned" | "Dead" | "Respawning" | "AtExit";
@@ -17,6 +19,7 @@ export interface RoomView {
   code: string;
   state: MatchState;
   players: LobbyPlayer[];
+  map: EditableMapDefinition;
 }
 
 export interface PlayerSnapshot {
@@ -33,6 +36,12 @@ export interface PlayerSnapshot {
   connected: boolean;
   lastProcessedInput: number;
   supportedHangingPlayers: number;
+  crystalMotion?: {
+    glideRemaining: number;
+    coasting: boolean;
+    wasOnCrystal: boolean;
+    lastDirection: number;
+  };
   /** Server timestamp at which the player irreversibly entered the open exit. */
   exitedAt?: number;
   support?: {
@@ -61,6 +70,7 @@ export interface ObjectSnapshot {
   height: number;
   velocityX: number;
   velocityY: number;
+  texture?: import("./mapTypes.js").MapTexture;
 }
 
 export interface VictoryResult {
@@ -68,6 +78,12 @@ export interface VictoryResult {
   name: string;
   color: number;
   timeMs: number;
+}
+
+export interface PlayerContactEvent {
+  playerA: { id: string; name: string; color: number };
+  playerB: { id: string; name: string; color: number };
+  occurredAt: number;
 }
 
 export interface GameSnapshot {

@@ -2,9 +2,10 @@ import crypto from "node:crypto";
 import type { Server } from "socket.io";
 import {
   COLORS, NETWORK, ROOM_MAX_PLAYERS, ROOM_MIN_PLAYERS, type ClientToServerEvents,
-  type LobbyPlayer, type MatchState, type PlayerInput, type RoomView, type ServerToClientEvents
+  type EditableMapDefinition, type LobbyPlayer, type MatchState, type PlayerInput, type RoomView, type ServerToClientEvents
 } from "@tetherbound/shared";
 import { ServerGame } from "../game/ServerGame.js";
+import { defaultMapDefinition } from "../levels/level1.js";
 
 type IO = Server<ClientToServerEvents, ServerToClientEvents>;
 
@@ -25,13 +26,17 @@ export class GameRoom {
   private snapshotTimer?: NodeJS.Timeout;
   private simulationAccumulator = 0;
   private lastSimulationTime = 0;
+  readonly map: EditableMapDefinition;
+  private readonly customMap?: EditableMapDefinition;
 
-  constructor(code: string, private readonly io: IO, private readonly onEmpty: () => void) {
+  constructor(code: string, private readonly io: IO, private readonly onEmpty: () => void, map?: EditableMapDefinition) {
     this.code = code;
+    this.customMap = map ? structuredClone(map) : undefined;
+    this.map = structuredClone(map ?? defaultMapDefinition());
   }
 
   get view(): RoomView {
-    return { code: this.code, state: this.state, players: [...this.members.values()].map(this.publicMember) };
+    return { code: this.code, state: this.state, players: [...this.members.values()].map(this.publicMember), map: this.map };
   }
 
   createMember(socketId: string, name: string, color: number): Member {
@@ -52,6 +57,14 @@ export class GameRoom {
     this.members.set(id, member);
     this.broadcast(`${name} se unió.`);
     return member;
+  }
+
+  createMemberWithRandomColor(socketId: string, name: string): Member {
+    const usedColors = new Set([...this.members.values()].map((member) => member.color));
+    const availableColors = COLORS.filter((color) => !usedColors.has(color));
+    if (availableColors.length === 0) throw new Error("No quedan colores disponibles.");
+    const color = availableColors[Math.floor(Math.random() * availableColors.length)]!;
+    return this.createMember(socketId, name, color);
   }
 
   reconnect(token: string, socketId: string): Member | undefined {
@@ -81,10 +94,11 @@ export class GameRoom {
     if (connected.length < ROOM_MIN_PLAYERS) return `Se necesitan al menos ${ROOM_MIN_PLAYERS} jugadores.`;
     if (!connected.every((m) => m.ready)) return "Todos los jugadores deben estar listos.";
     this.stopGame();
-    this.game = new ServerGame();
+    this.game = new ServerGame(this.customMap);
     for (const m of connected) this.game.addPlayer(m.id, m.name, m.color);
+    this.game.randomizeSpawnOrder();
     this.state = "playing";
-    this.io.to(this.code).emit("game:started");
+    this.io.to(this.code).emit("game:started", this.map);
     this.emitView();
     this.startSimulation();
     return undefined;
@@ -96,7 +110,7 @@ export class GameRoom {
     if (this.state !== "victory" || !this.game) return "La partida todavía no terminó.";
     this.game.restart();
     this.state = "playing";
-    this.io.to(this.code).emit("game:started");
+    this.io.to(this.code).emit("game:started", this.map);
     this.emitView();
     this.startSimulation();
     return undefined;
@@ -107,6 +121,14 @@ export class GameRoom {
     if (!member?.leader) return "Solo el líder puede salir al lobby.";
     if (this.state !== "victory") return "La partida todavía no terminó.";
     this.returnToLobby();
+    return undefined;
+  }
+
+  endGame(id: string): string | undefined {
+    const member = this.members.get(id);
+    if (!member?.leader) return "Solo el líder puede terminar la partida.";
+    if (this.state !== "playing" && this.state !== "victory") return "No hay una partida en curso.";
+    this.closeRoom();
     return undefined;
   }
 
@@ -121,6 +143,9 @@ export class GameRoom {
       let steps = 0;
       while (this.simulationAccumulator >= stepMs && steps < 5) {
         this.game?.step();
+        for (const contact of this.game?.drainPlayerContactEvents() ?? []) {
+          this.io.to(this.code).emit("game:playerContact", contact);
+        }
         this.simulationAccumulator -= stepMs;
         steps++;
       }
@@ -187,6 +212,11 @@ export class GameRoom {
     this.state = "lobby";
     for (const member of this.members.values()) member.ready = false;
     this.emitView();
+  }
+
+  private closeRoom(): void {
+    this.stopGame();
+    this.io.to(this.code).emit("room:closed", "El creador cerró la partida.");
   }
 
   private stopGame(): void {

@@ -112,6 +112,22 @@ describe("ClientPrediction", () => {
     expect(prediction.vx).toBe(0);
   });
 
+  it("predicts crystal coasting and counter-steering with the server rule", () => {
+    const prediction = new ClientPrediction();
+    const sliding = player({
+      velocityX: 120,
+      support: { id: "platform:start", topY: 625, velocityX: 0, velocityY: 0 },
+      crystalMotion: { glideRemaining: 0, coasting: false, wasOnCrystal: true, lastDirection: 1 },
+    });
+    const snapshot = world(sliding);
+    snapshot.objects[0]!.texture = "crystal";
+    prediction.reconcile(sliding, snapshot);
+    prediction.predict(input(1), 1 / 60);
+    expect(prediction.vx).toBe(120);
+    prediction.predict({ ...input(2), left: true }, 1 / 60);
+    expect(prediction.vx).toBe(120);
+  });
+
   it("predicts a horizontal platform collision instead of crossing it", () => {
     const prediction = new ClientPrediction();
     const local = player({ x: 80, y: 604, velocityX: 240 });

@@ -1,7 +1,11 @@
 import "./style.css";
-import { COLORS, type RoomReply, type RoomView, type VictoryResult } from "@tetherbound/shared";
+import {
+  type EditableMapDefinition, type PlayerContactEvent, type RoomReply, type RoomView, type VictoryResult
+} from "@tetherbound/shared";
 import { SocketClient } from "./network/SocketClient";
 import { createGame } from "./game/Game";
+import { openMapManager } from "./editor/MapEditor";
+import { gameAudio } from "./audio/GameAudio";
 
 const app = document.querySelector<HTMLElement>("#app")!;
 app.innerHTML = `
@@ -9,7 +13,21 @@ app.innerHTML = `
   <div class="shell" id="shell"></div>
   <div class="hud" id="hud" hidden>
     <div class="mission" id="mission">Encuentren la llave y lleguen juntos a la salida</div>
+    <div class="contact-feed" id="contact-feed" aria-live="polite" aria-label="Contactos entre jugadores"></div>
     <div class="room-pill" id="room-pill"></div>
+    <button class="sound-toggle" id="sound-toggle" type="button" aria-label="Silenciar sonidos"></button>
+    <button class="exit-game" id="exit-game" type="button" hidden>Salir</button>
+    <div class="game-confirm" id="game-confirm" hidden>
+      <section class="card game-confirm-card" role="dialog" aria-modal="true" aria-labelledby="game-confirm-title">
+        <div class="eyebrow">Terminar partida</div>
+        <h2 id="game-confirm-title">¿Querés salir?</h2>
+        <p class="subtitle">La partida terminará para todo el equipo y todos volverán a la pantalla principal.</p>
+        <div class="actions">
+          <button class="button secondary" id="cancel-exit" type="button">Seguir jugando</button>
+          <button class="button danger" id="confirm-exit" type="button">Salir</button>
+        </div>
+      </section>
+    </div>
     <pre class="debug" id="debug"></pre>
     <div class="toast" id="toast" hidden></div>
   </div>
@@ -19,36 +37,54 @@ const shell = document.querySelector<HTMLElement>("#shell")!;
 const hud = document.querySelector<HTMLElement>("#hud")!;
 const toast = document.querySelector<HTMLElement>("#toast")!;
 const mission = document.querySelector<HTMLElement>("#mission")!;
+const contactFeed = document.querySelector<HTMLElement>("#contact-feed")!;
+const soundToggle = document.querySelector<HTMLButtonElement>("#sound-toggle")!;
+const exitGameButton = document.querySelector<HTMLButtonElement>("#exit-game")!;
+const gameConfirm = document.querySelector<HTMLElement>("#game-confirm")!;
+const cancelExitButton = document.querySelector<HTMLButtonElement>("#cancel-exit")!;
+const confirmExitButton = document.querySelector<HTMLButtonElement>("#confirm-exit")!;
 const network = new SocketClient();
 let room: RoomView | undefined;
 let notice = "";
 let gameStarted = false;
 let draftRoomCode = "";
 let draftName = "";
-let draftColor: number = COLORS[0];
+
+function updateSoundButton(): void {
+  soundToggle.textContent = gameAudio.isMuted ? "🔇" : "🔊";
+  soundToggle.setAttribute("aria-label", gameAudio.isMuted ? "Activar sonidos" : "Silenciar sonidos");
+  soundToggle.title = gameAudio.isMuted ? "Activar sonidos" : "Silenciar sonidos";
+}
+
+soundToggle.addEventListener("click", () => {
+  gameAudio.toggleMuted();
+  updateSoundButton();
+});
+document.addEventListener("pointerdown", () => { void gameAudio.unlock(); }, { once: true });
+document.addEventListener("keydown", () => { void gameAudio.unlock(); }, { once: true });
+updateSoundButton();
 
 const escape = (value: string) => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 const identityFields = () => `
   <label class="field">Nombre
     <input id="player-name" maxlength="18" autocomplete="nickname" value="${escape(draftName)}" />
-  </label>
-  <fieldset class="color-picker"><legend>Color</legend>
-    ${COLORS.map((color) => `<button type="button" class="color-choice ${color === draftColor ? "selected" : ""}" data-color="${color}" aria-label="Elegir color" style="--color:#${color.toString(16).padStart(6, "0")}"></button>`).join("")}
-  </fieldset>`;
+  </label>`;
 
 function bindIdentityFields(): void {
   const name = shell.querySelector<HTMLInputElement>("#player-name")!;
   name.addEventListener("input", () => { draftName = name.value; });
-  shell.querySelectorAll<HTMLButtonElement>(".color-choice").forEach((choice) => {
-    choice.onclick = () => {
-      draftColor = Number(choice.dataset.color);
-      shell.querySelectorAll(".color-choice").forEach((item) => item.classList.toggle("selected", item === choice));
-    };
-  });
 }
 
-const identityRequest = () => ({ name: draftName.trim(), color: draftColor });
+const identityRequest = () => ({ name: draftName.trim() });
+
+async function createRoomWithMap(map: EditableMapDefinition): Promise<string | undefined> {
+  if (!draftName.trim()) return "Ingresá tu nombre en la pantalla principal antes de jugar el mapa.";
+  const reply = await network.create({ ...identityRequest(), map });
+  if (!reply.ok) return reply.error ?? "No se pudo crear la sala con este mapa.";
+  finishRoomEntry(reply);
+  return undefined;
+}
 
 function renderMenu(): void {
   shell.hidden = false;
@@ -63,22 +99,71 @@ function renderMenu(): void {
         <button class="button" id="create">Crear sala</button>
         <button class="button secondary" id="join">Unirme</button>
       </div>
+      <button class="map-editor-entry" id="open-map-editor" type="button">Editor de mapas</button>
       <div class="notice">${escape(notice)}</div>
       <div class="controls">Teclado: A/D o flechas · Saltar: W, ↑ o espacio · Gamepad compatible</div>
     </section>`;
   bindIdentityFields();
-  shell.querySelector<HTMLButtonElement>("#create")!.onclick = async () => {
-    const reply = await network.create(identityRequest());
-    if (!reply.ok) {
-      notice = reply.error ?? "No se pudo conectar.";
-      renderMenu();
-      return;
-    }
-    finishRoomEntry(reply);
+  shell.querySelector<HTMLButtonElement>("#create")!.onclick = () => {
+    notice = "";
+    renderGameModePrompt();
   };
   shell.querySelector<HTMLButtonElement>("#join")!.onclick = () => {
     notice = "";
     renderJoinPrompt();
+  };
+  shell.querySelector<HTMLButtonElement>("#open-map-editor")!.onclick = () => {
+    openMapManager(shell, renderMenu, createRoomWithMap);
+  };
+}
+
+function renderGameModePrompt(): void {
+  shell.hidden = false;
+  hud.hidden = true;
+  shell.innerHTML = `
+    <section class="card mode-card" role="dialog" aria-labelledby="mode-title" aria-modal="true">
+      <div class="eyebrow">Nueva sala</div>
+      <h2 id="mode-title">Elige un modo</h2>
+      <p class="subtitle">Selecciona cómo quieren jugar. Muy pronto habrá más desafíos.</p>
+      <div class="mode-options" role="radiogroup" aria-label="Modo de juego">
+        <button class="mode-option" type="button" disabled aria-disabled="true">
+          <span class="mode-option-title">Atados</span>
+          <span class="mode-option-description">Coordinen cada movimiento unidos por una cuerda.</span>
+          <span class="mode-option-status">Próximamente</span>
+        </button>
+        <button class="mode-option selected" type="button" role="radio" aria-checked="true" data-mode="no-touch">
+          <span class="mode-option-title">No se toquen</span>
+          <span class="mode-option-description">Superen el recorrido sin tocar a los demás jugadores.</span>
+          <span class="mode-option-status available">Seleccionado</span>
+        </button>
+        <button class="mode-option" type="button" disabled aria-disabled="true">
+          <span class="mode-option-title">Totems</span>
+          <span class="mode-option-description">Activen los totems en equipo para abrir el camino.</span>
+          <span class="mode-option-status">Próximamente</span>
+        </button>
+      </div>
+      <div class="actions">
+        <button class="button secondary" id="cancel-mode">Volver</button>
+        <button class="button" id="confirm-mode">Crear sala</button>
+      </div>
+      <div class="notice">${escape(notice)}</div>
+    </section>`;
+
+  shell.querySelector<HTMLButtonElement>("#cancel-mode")!.onclick = () => {
+    notice = "";
+    renderMenu();
+  };
+  shell.querySelector<HTMLButtonElement>("#confirm-mode")!.onclick = async () => {
+    const confirmButton = shell.querySelector<HTMLButtonElement>("#confirm-mode")!;
+    confirmButton.disabled = true;
+    confirmButton.textContent = "Creando…";
+    const reply = await network.create(identityRequest());
+    if (!reply.ok) {
+      notice = reply.error ?? "No se pudo conectar.";
+      renderGameModePrompt();
+      return;
+    }
+    finishRoomEntry(reply);
   };
 }
 
@@ -135,6 +220,7 @@ function finishRoomEntry(reply: RoomReply): void {
     }));
   }
   room = reply.room;
+  network.activeMap = reply.room?.map;
   draftRoomCode = "";
   renderLobby();
 }
@@ -148,6 +234,7 @@ function renderLobby(): void {
     <section class="card">
       <div class="eyebrow">Sala <span class="room-code">${escape(room.code)}</span></div>
       <h2>Formen el equipo</h2>
+      <div class="badge ready">Mapa: ${escape(room.map.name)}</div>
       <p class="subtitle">Compartan el código. La expedición comienza cuando todos estén listos.</p>
       <div class="players">${room.players.map((p) => `
         <div class="player-row">
@@ -175,6 +262,63 @@ function showGame(): void {
   shell.hidden = true;
   hud.hidden = false;
   document.querySelector<HTMLElement>("#room-pill")!.textContent = room?.code ?? "";
+  contactFeed.replaceChildren();
+  gameConfirm.hidden = true;
+  updateLeaderExitButton();
+}
+
+function updateLeaderExitButton(): void {
+  const self = room?.players.find((player) => player.id === network.playerId);
+  exitGameButton.hidden = !gameStarted || !self?.leader;
+  if (!self?.leader) gameConfirm.hidden = true;
+}
+
+exitGameButton.addEventListener("click", () => {
+  gameConfirm.hidden = false;
+  confirmExitButton.focus();
+});
+
+cancelExitButton.addEventListener("click", () => {
+  gameConfirm.hidden = true;
+  exitGameButton.focus();
+});
+
+confirmExitButton.addEventListener("click", () => {
+  confirmExitButton.disabled = true;
+  network.socket.emit("game:end", (reply) => {
+    confirmExitButton.disabled = false;
+    if (reply.ok) return;
+    gameConfirm.hidden = true;
+    toast.textContent = reply.error ?? "No se pudo terminar la partida.";
+    toast.hidden = false;
+    window.setTimeout(() => { toast.hidden = true; }, 2000);
+  });
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !gameConfirm.hidden) {
+    gameConfirm.hidden = true;
+    exitGameButton.focus();
+  }
+});
+
+function showPlayerContact(contact: PlayerContactEvent): void {
+  gameAudio.touch();
+  const message = document.createElement("div");
+  message.className = "contact-message";
+  const [first, second] = Math.random() < 0.5
+    ? [contact.playerA, contact.playerB]
+    : [contact.playerB, contact.playerA];
+  const firstColor = `#${first.color.toString(16).padStart(6, "0")}`;
+  const secondColor = `#${second.color.toString(16).padStart(6, "0")}`;
+  message.innerHTML = `
+    <span class="contact-player"><span class="contact-dot" style="--color:${firstColor}"></span>${escape(first.name)}</span>
+    <span class="contact-action">y</span>
+    <span class="contact-player"><span class="contact-dot" style="--color:${secondColor}"></span>${escape(second.name)}</span>
+    <span class="contact-action">se tocaron</span>`;
+  while (contactFeed.children.length >= 6) contactFeed.firstElementChild?.remove();
+  contactFeed.append(message);
+  window.setTimeout(() => message.remove(), 1500);
 }
 
 function formatTime(timeMs: number): string {
@@ -185,6 +329,7 @@ function formatTime(timeMs: number): string {
 }
 
 function renderVictory(results: VictoryResult[]): void {
+  gameAudio.victory();
   const self = room?.players.find((player) => player.id === network.playerId);
   gameStarted = false;
   hud.hidden = true;
@@ -219,7 +364,7 @@ function renderVictory(results: VictoryResult[]): void {
     }
   };
   shell.querySelector<HTMLButtonElement>("#exit-lobby")?.addEventListener("click", () => {
-    network.socket.emit("game:exitToLobby", handleReply);
+    network.socket.emit("game:end", handleReply);
   });
   shell.querySelector<HTMLButtonElement>("#play-again")?.addEventListener("click", () => {
     network.socket.emit("game:playAgain", handleReply);
@@ -229,18 +374,34 @@ function renderVictory(results: VictoryResult[]): void {
 network.socket.on("room:update", (updated) => {
   room = updated;
   network.roomCode = updated.code;
+  network.activeMap = updated.map;
   if (updated.state === "lobby") {
     gameStarted = false;
     renderLobby();
   } else if (updated.state === "playing" && !gameStarted) {
     showGame();
   }
+  updateLeaderExitButton();
 });
 network.socket.on("room:notice", (message) => {
   notice = message;
   if (!gameStarted) renderLobby();
 });
-network.socket.on("game:started", showGame);
+network.socket.on("room:closed", (message) => {
+  network.clearSession();
+  room = undefined;
+  gameStarted = false;
+  gameConfirm.hidden = true;
+  confirmExitButton.disabled = false;
+  contactFeed.replaceChildren();
+  notice = message;
+  renderMenu();
+});
+network.socket.on("game:started", (map) => {
+  network.activeMap = map;
+  showGame();
+});
+network.socket.on("game:playerContact", showPlayerContact);
 network.socket.on("game:snapshot", (snapshot) => {
   mission.textContent = snapshot.keyState.collected
     ? `Puerta abierta · ${snapshot.doorState.inside}/${snapshot.doorState.required} en la salida`

@@ -1,5 +1,6 @@
 import {
-  PHYSICS, type GameSnapshot, type PlayerInput, type PlayerSnapshot
+  advanceHorizontalMotion, INITIAL_CRYSTAL_MOTION, PHYSICS,
+  type CrystalMotionState, type GameSnapshot, type PlayerInput, type PlayerSnapshot
 } from "@tetherbound/shared";
 
 interface Predicted { input: PlayerInput; dt: number }
@@ -11,6 +12,7 @@ interface PredictiveSurface {
   bottomY: number;
   velocityX: number;
   velocityY: number;
+  slippery: boolean;
 }
 
 export class ClientPrediction {
@@ -29,6 +31,7 @@ export class ClientPrediction {
   private supportId?: string;
   private jumpStartFeetY?: number;
   private surfaces: PredictiveSurface[] = [];
+  private crystalMotion: CrystalMotionState = { ...INITIAL_CRYSTAL_MOTION };
 
   get x(): number { return this.simulationX + this.correctionX; }
   get y(): number { return this.simulationY + this.correctionY; }
@@ -105,18 +108,16 @@ export class ClientPrediction {
       this.supportId = standingSurface.id;
     }
     const direction = this.movementLocked ? 0 : Number(input.right) - Number(input.left);
-    if (direction) {
-      const acceleration = this.grounded ? PHYSICS.GROUND_ACCELERATION : PHYSICS.AIR_ACCELERATION;
-      this.simulationVx = Math.max(
-        -PHYSICS.MAX_RUN_SPEED,
-        Math.min(PHYSICS.MAX_RUN_SPEED, this.simulationVx + direction * acceleration * dt)
-      );
-    } else {
-      const deceleration = PHYSICS.GROUND_DECELERATION * dt;
-      this.simulationVx = Math.abs(this.simulationVx) <= deceleration
-        ? 0
-        : this.simulationVx - Math.sign(this.simulationVx) * deceleration;
-    }
+    const motion = advanceHorizontalMotion(
+      this.simulationVx,
+      direction,
+      this.grounded,
+      !!standingSurface?.slippery,
+      dt,
+      this.crystalMotion
+    );
+    this.simulationVx = motion.velocityX;
+    this.crystalMotion = motion.crystal;
     if (!this.movementLocked && input.jumpPressed && this.grounded) {
       this.simulationVy = PHYSICS.JUMP_VELOCITY;
       this.jumpStartFeetY = this.simulationY + PHYSICS.PLAYER_HEIGHT / 2;
@@ -172,6 +173,9 @@ export class ClientPrediction {
     this.simulationVy = authoritative.velocityY;
     this.correctionX = 0;
     this.correctionY = 0;
+    this.crystalMotion = authoritative.crystalMotion
+      ? { ...authoritative.crystalMotion }
+      : { ...INITIAL_CRYSTAL_MOTION };
   }
 
   private updateSurfaces(snapshot: GameSnapshot, ownId: string): void {
@@ -184,6 +188,7 @@ export class ClientPrediction {
         bottomY: object.y + object.height / 2,
         velocityX: object.velocityX,
         velocityY: object.velocityY,
+        slippery: object.texture === "crystal",
       })),
       ...snapshot.players
         .filter((player) => player.id !== ownId && player.state !== "Dead")
@@ -195,6 +200,7 @@ export class ClientPrediction {
           bottomY: player.y + PHYSICS.PLAYER_HEIGHT / 2,
           velocityX: player.velocityX,
           velocityY: player.velocityY,
+          slippery: false,
         })),
     ];
   }

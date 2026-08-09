@@ -1,4 +1,6 @@
-import { OBSTACLE_HEIGHTS, PHYSICS, ROOM_MAX_PLAYERS, validateObstacle } from "@tetherbound/shared";
+import {
+  OBSTACLE_HEIGHTS, PHYSICS, ROOM_MAX_PLAYERS, validateObstacle, type EditableMapDefinition
+} from "@tetherbound/shared";
 
 export interface RectDef { id: string; x: number; y: number; width: number; height: number }
 export interface MandatoryAscent { supportId: string; obstacleId: string }
@@ -88,3 +90,36 @@ export const level1 = {
   key: { x: 2250, y: keyDaisTop - 42 },
   door: { x: 2580, y: 570, width: 80, height: 110 },
 };
+
+/** Serializable representation sent to clients and shown in the map library/lobby. */
+export function defaultMapDefinition(): EditableMapDefinition {
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  return {
+    schemaVersion: 1,
+    id: "builtin-forest-ruins",
+    name: "Ruinas del bosque",
+    width: level1.width,
+    height: level1.height,
+    background: { preset: "forest" },
+    objects: [
+      { id: "spawn", kind: "spawn", name: "Spawn", x: level1.spawn.x, y: level1.spawn.y, width: 42, height: 58, texture: "crystal" },
+      ...level1.platforms.map((platform) => ({ ...platform, kind: "platform" as const, name: platform.id, texture: "grass" as const })),
+      {
+        id: level1.movingPlatform.id, kind: "movingPlatform", name: "Puente móvil",
+        x: level1.movingPlatform.x, y: level1.movingPlatform.y,
+        width: level1.movingPlatform.width, height: level1.movingPlatform.height, texture: "metal",
+        moving: {
+          axis: "horizontal", distance: level1.movingPlatform.toX - level1.movingPlatform.fromX,
+          speed: level1.movingPlatform.speed,
+        },
+      },
+      ...level1.boxes.map((box) => ({ ...box, kind: "box" as const, name: box.id, texture: "wood" as const })),
+      { id: "checkpoint", kind: "checkpoint", name: "Checkpoint", x: level1.checkpoint.x, y: level1.checkpoint.y, width: 54, height: 90, texture: "crystal" },
+      { id: "key", kind: "key", name: "Llave", x: level1.key.x, y: level1.key.y, width: 42, height: 42, texture: "crystal" },
+      { id: "door", kind: "door", name: "Puerta", x: level1.door.x, y: level1.door.y, width: level1.door.width, height: level1.door.height, texture: "stone" },
+      { id: "void", kind: "deathZone", name: "Vacío", x: level1.width / 2, y: level1.deathY + 20, width: level1.width, height: 40, texture: "hazard" },
+    ],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}

@@ -6,25 +6,13 @@ test("two browsers can create, join, ready and start", async ({ browser }) => {
   const pageA = await a.newPage();
   const pageB = await b.newPage();
   await pageA.goto("/");
-  const cardBox = await pageA.locator(".card").boundingBox();
-  const colorBoxes = await pageA.getByRole("button", { name: "Elegir color" }).evaluateAll((buttons) =>
-    buttons.map((button) => {
-      const box = button.getBoundingClientRect();
-      return { left: box.left, right: box.right };
-    })
-  );
-  expect(cardBox).not.toBeNull();
-  for (const colorBox of colorBoxes) {
-    expect(colorBox.left).toBeGreaterThanOrEqual(cardBox!.x);
-    expect(colorBox.right).toBeLessThanOrEqual(cardBox!.x + cardBox!.width);
-  }
-  await pageA.getByLabel("Tu nombre").fill("Luna");
-  await pageA.getByRole("button", { name: "Elegir color" }).nth(1).click();
-  await expect(pageA.getByLabel("Tu nombre")).toHaveValue("Luna");
+  await pageA.getByLabel("Nombre").fill("Luna");
+  await expect(pageA.getByLabel("Nombre")).toHaveValue("Luna");
+  await pageA.getByRole("button", { name: "Crear sala" }).click();
   await pageA.getByRole("button", { name: "Crear sala" }).click();
   const code = (await pageA.locator(".room-code").textContent())!.trim();
   await pageB.goto("/");
-  await pageB.getByLabel("Tu nombre").fill("Sol");
+  await pageB.getByLabel("Nombre").fill("Sol");
   await expect(pageB.getByLabel("Código de sala")).toHaveCount(0);
   await pageB.getByRole("button", { name: "Unirme" }).click();
   await pageB.getByLabel("Código de sala").fill(code);

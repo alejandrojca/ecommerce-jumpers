@@ -1,12 +1,13 @@
 import { io, type Socket } from "socket.io-client";
 import type {
-  ClientToServerEvents, JoinRequest, RoomReply, ServerToClientEvents
+  ClientToServerEvents, CreateRoomRequest, EditableMapDefinition, JoinRequest, RoomReply, ServerToClientEvents
 } from "@tetherbound/shared";
 
 export class SocketClient {
   readonly socket: Socket<ServerToClientEvents, ClientToServerEvents>;
   playerId = "";
   roomCode = "";
+  activeMap?: EditableMapDefinition;
   private reconnectingSession = false;
 
   constructor() {
@@ -16,7 +17,7 @@ export class SocketClient {
     this.socket.on("connect", () => this.reconnectSaved());
   }
 
-  create(data: JoinRequest): Promise<RoomReply> {
+  create(data: CreateRoomRequest): Promise<RoomReply> {
     return new Promise((resolve) => this.socket.emit("room:create", data, (reply) => {
       this.capture(reply);
       resolve(reply);
@@ -41,6 +42,13 @@ export class SocketClient {
         this.reconnectingSession = false;
       });
     } catch { localStorage.removeItem("tetherbound-session"); }
+  }
+
+  clearSession(): void {
+    localStorage.removeItem("tetherbound-session");
+    this.playerId = "";
+    this.roomCode = "";
+    this.activeMap = undefined;
   }
 
   private capture(reply: RoomReply): void {

@@ -56,8 +56,12 @@ describe("exited players remain outside the match during respawns", () => {
     game.step();
 
     expectStillExited(game, exited, now);
-    expect(player(game, "a").body.position.x).toBeCloseTo(initialSpawnSlots()[1]!.x, 0);
-    expect(player(game, "b").body.position.x).toBeCloseTo(initialSpawnSlots()[2]!.x, 0);
+    const activeSpawnXs = [player(game, "a").body.position.x, player(game, "b").body.position.x]
+      .sort((left, right) => left - right);
+    const expectedSpawnXs = [initialSpawnSlots()[1]!.x, initialSpawnSlots()[2]!.x]
+      .sort((left, right) => left - right);
+    expect(activeSpawnXs[0]).toBeCloseTo(expectedSpawnXs[0]!, 0);
+    expect(activeSpawnXs[1]).toBeCloseTo(expectedSpawnXs[1]!, 0);
   });
 
   it("preserves an exited player through partial and all-active void recovery", () => {

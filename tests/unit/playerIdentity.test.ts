@@ -7,11 +7,21 @@ const silentIo = {
   to: () => ({ emit: () => undefined }),
 };
 
-describe("player-selected identity", () => {
-  it("requires a valid name and color except when reconnecting", () => {
+describe("player identity", () => {
+  it("requires a valid name except when reconnecting", () => {
     expect(joinSchema.safeParse({}).success).toBe(false);
-    expect(joinSchema.safeParse({ name: "Ada", color: COLORS[0] }).success).toBe(true);
+    expect(joinSchema.safeParse({ name: "Ada" }).success).toBe(true);
     expect(joinSchema.safeParse({ reconnectToken: "saved-session" }).success).toBe(true);
+  });
+
+  it("assigns distinct random colors to new members", () => {
+    const room = new GameRoom("TEST", silentIo as never, () => undefined);
+    const ada = room.createMemberWithRandomColor("socket-a", "Ada");
+    const lin = room.createMemberWithRandomColor("socket-b", "Lin");
+
+    expect(COLORS).toContain(ada.color);
+    expect(COLORS).toContain(lin.color);
+    expect(lin.color).not.toBe(ada.color);
   });
 
   it("preserves the chosen identity in the room view", () => {

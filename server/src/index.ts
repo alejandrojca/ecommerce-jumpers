@@ -3,7 +3,7 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { Server } from "socket.io";
 import {
-  inputSchema, joinSchema, NETWORK, type ClientToServerEvents, type ServerToClientEvents
+  createRoomSchema, inputSchema, joinSchema, NETWORK, type ClientToServerEvents, type ServerToClientEvents
 } from "@tetherbound/shared";
 import { RoomManager } from "./rooms/RoomManager.js";
 
@@ -24,10 +24,10 @@ const rooms = new RoomManager(io);
 io.on("connection", (socket) => {
   socket.on("net:ping", (_clientTime, reply) => reply(Date.now()));
   socket.on("room:create", (raw, reply) => {
-    const parsed = joinSchema.safeParse(raw);
+    const parsed = createRoomSchema.safeParse(raw);
     if (!parsed.success) return reply({ ok: false, error: "Datos inválidos." });
     try {
-      const result = rooms.create(socket, parsed.data.name!, parsed.data.color!);
+      const result = rooms.create(socket, parsed.data.name, parsed.data.map);
       reply({ ok: true, room: result.room.view, playerId: result.playerId, reconnectToken: result.token });
     } catch (error) {
       reply({ ok: false, error: error instanceof Error ? error.message : "No se pudo crear la sala." });
@@ -62,6 +62,10 @@ io.on("connection", (socket) => {
   socket.on("game:restart", () => {
     const session = rooms.session(socket.id);
     if (session) session.room.restart(session.playerId);
+  });
+  socket.on("game:end", (reply) => {
+    const error = rooms.endGame(socket.id);
+    reply(error ? { ok: false, error } : { ok: true });
   });
   socket.on("game:exitToLobby", (reply) => {
     const session = rooms.session(socket.id);

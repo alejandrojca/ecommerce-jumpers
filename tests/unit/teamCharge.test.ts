@@ -26,7 +26,10 @@ function separate(game: ServerGame, id: string): void {
 }
 
 describe("authoritative global team charge", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("starts full and counts a sustained contact only once", () => {
     const game = new ServerGame();
@@ -35,8 +38,14 @@ describe("authoritative global team charge", () => {
     expect(game.snapshot().teamCharge).toEqual({ current: 6, max: 6 });
     collide(game, "a", "b");
     expect(game.snapshot().teamCharge.current).toBe(5);
+    expect(game.drainPlayerContactEvents()).toEqual([{
+      playerA: { id: "a", name: "A", color: 1 },
+      playerB: { id: "b", name: "B", color: 2 },
+      occurredAt: expect.any(Number),
+    }]);
     game.step();
     expect(game.snapshot().teamCharge.current).toBe(5);
+    expect(game.drainPlayerContactEvents()).toEqual([]);
   });
 
   it("requires both separation and the 1500ms per-pair cooldown", () => {
@@ -71,11 +80,13 @@ describe("authoritative global team charge", () => {
     }
     expect(game.snapshot().teamCharge.current).toBe(0);
     expect(game.snapshot().players.every((p) => p.state === "Dead")).toBe(true);
+    vi.spyOn(Math, "random").mockReturnValue(0);
     vi.advanceTimersByTime(PHYSICS.RESPAWN_DELAY_MS + 1);
     game.step();
     expect(game.snapshot().teamCharge.current).toBe(6);
-    expect(Math.abs(player(game, "a").body.position.x - initialSpawnSlots()[0]!.x)).toBeLessThan(3);
-    expect(Math.abs(player(game, "a").body.position.y - initialSpawnSlots()[0]!.y)).toBeLessThan(3);
+    expect(Math.abs(player(game, "a").body.position.x - initialSpawnSlots()[1]!.x)).toBeLessThan(3);
+    expect(Math.abs(player(game, "a").body.position.y - initialSpawnSlots()[1]!.y)).toBeLessThan(3);
+    expect(Math.abs(player(game, "b").body.position.x - initialSpawnSlots()[0]!.x)).toBeLessThan(3);
   });
 
   it("does not constrain separated players and never emits ropes", () => {

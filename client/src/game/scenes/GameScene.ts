@@ -1,10 +1,23 @@
 import Phaser from "phaser";
-import { PHYSICS, type GameSnapshot, type PlayerInput } from "@tetherbound/shared";
+import {
+  PHYSICS, type EditableMapDefinition, type EditableMapObject, type GameSnapshot, type MapTexture, type PlayerInput
+} from "@tetherbound/shared";
 import type { SocketClient } from "../../network/SocketClient";
 import { SnapshotBuffer } from "../../network/SnapshotBuffer";
 import { ClientPrediction } from "../../network/ClientPrediction";
 import { InputController } from "../../input/InputController";
 import { CLIENT_CONFIG } from "../../config/clientConfig";
+import { gameAudio } from "../../audio/GameAudio";
+
+interface FrictionParticle {
+  x: number;
+  y: number;
+  velocityX: number;
+  velocityY: number;
+  life: number;
+  maxLife: number;
+  size: number;
+}
 
 export class GameScene extends Phaser.Scene {
   private static readonly BACKGROUND_KEY = "level-background";
@@ -25,6 +38,13 @@ export class GameScene extends Phaser.Scene {
   private pingTimer?: ReturnType<typeof setInterval>;
   private background?: Phaser.GameObjects.Image;
   private readonly platformImages = new Map<string, Phaser.GameObjects.Image>();
+  private currentMap?: EditableMapDefinition;
+  private previousSnapshot?: GameSnapshot;
+  private lastFootstepAt = 0;
+  private lastJumpSoundAt = 0;
+  private lastPredictedVelocityX = 0;
+  private lastFrictionBurstAt = 0;
+  private frictionParticles: FrictionParticle[] = [];
 
   constructor(private readonly network: SocketClient, private readonly debugElement: HTMLElement) {
     super("GameScene");
@@ -66,6 +86,10 @@ export class GameScene extends Phaser.Scene {
       const input = this.inputController.read();
       const local = this.latest.players.find((p) => p.id === this.network.playerId);
       if (local && local.state !== "AtExit" && local.state !== "Dead" && local.state !== "Respawning") {
+        if (input.jumpPressed && local.grounded && performance.now() - this.lastJumpSoundAt > 180) {
+          gameAudio.jump();
+          this.lastJumpSoundAt = performance.now();
+        }
         this.sendInput(input);
         this.prediction.predict(input, 1 / 60);
       }
@@ -74,7 +98,10 @@ export class GameScene extends Phaser.Scene {
     this.renderWorld();
     const local = this.latest.players.find((p) => p.id === this.network.playerId);
     if (local) {
-      const target = Math.max(0, Math.min(2700 - this.scale.width, this.prediction.x - this.scale.width * 0.45));
+      this.updateFootsteps(local);
+      this.updateFrictionEffect(local, deltaMs);
+      const worldWidth = this.currentMap?.width ?? 2700;
+      const target = Math.max(0, Math.min(worldWidth - this.scale.width, this.prediction.x - this.scale.width * 0.45));
       this.cameras.main.scrollX += (target - this.cameras.main.scrollX) * 0.08;
     }
     this.updateDebug();
@@ -90,16 +117,115 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onSnapshot = (snapshot: GameSnapshot): void => {
+    this.configureMap();
+    this.processAudioTransitions(snapshot);
     this.latest = snapshot;
     this.snapshots.push(snapshot);
     const local = snapshot.players.find((p) => p.id === this.network.playerId);
     if (local) this.predictionError = this.prediction.reconcile(local, snapshot);
   };
 
+  private processAudioTransitions(snapshot: GameSnapshot): void {
+    const previous = this.previousSnapshot;
+    this.previousSnapshot = snapshot;
+    if (!previous) return;
+    const current = snapshot.players.find((player) => player.id === this.network.playerId);
+    const prior = previous.players.find((player) => player.id === this.network.playerId);
+    if (current && prior) {
+      if (current.state === "Jumping" && prior.state !== "Jumping" && performance.now() - this.lastJumpSoundAt > 180) {
+        gameAudio.jump();
+        this.lastJumpSoundAt = performance.now();
+      }
+      if (!prior.grounded && current.grounded && current.state !== "Dead" && current.state !== "Respawning") {
+        gameAudio.land(Math.abs(prior.velocityY) / PHYSICS.MAX_FALL_SPEED);
+      }
+      if (!current.grounded && current.velocityY > 260 && prior.velocityY <= 260) gameAudio.fall();
+      if (current.state === "Dead" && prior.state !== "Dead") gameAudio.death();
+      if (current.state === "Respawning" && prior.state !== "Respawning") gameAudio.respawn();
+      if (current.state === "AtExit" && prior.state !== "AtExit") gameAudio.exit();
+    }
+    if (!previous.keyState.collected && snapshot.keyState.collected) gameAudio.collectKey();
+    if (!previous.doorState.open && snapshot.doorState.open) gameAudio.doorOpen();
+  }
+
+  private updateFootsteps(local: GameSnapshot["players"][number]): void {
+    if (!local.grounded || Math.abs(this.prediction.vx) < 55 || local.state === "Dead" || local.state === "Respawning") return;
+    const now = performance.now();
+    const speed = Math.min(1, Math.abs(this.prediction.vx) / PHYSICS.MAX_RUN_SPEED);
+    const texture = this.supportTexture(local);
+    const interval = texture === "crystal"
+      ? Phaser.Math.Linear(250, 175, speed)
+      : Phaser.Math.Linear(390, 230, speed);
+    if (now - this.lastFootstepAt < interval) return;
+    this.lastFootstepAt = now;
+    if (texture === "crystal") {
+      gameAudio.skate(speed);
+      return;
+    }
+    gameAudio.footstep(texture === "metal" || texture === "stone" ? "hard" : "soft");
+  }
+
+  private supportTexture(local: GameSnapshot["players"][number]): MapTexture | undefined {
+    if (!local.support) return undefined;
+    return this.definitionForSnapshot(local.support.id)?.texture
+      ?? this.latest?.objects.find((object) => object.id === local.support?.id)?.texture;
+  }
+
+  private updateFrictionEffect(local: GameSnapshot["players"][number], deltaMs: number): void {
+    const dt = Math.min(deltaMs, 33) / 1000;
+    for (const particle of this.frictionParticles) {
+      particle.x += particle.velocityX * dt;
+      particle.y += particle.velocityY * dt;
+      particle.velocityY += 115 * dt;
+      particle.velocityX *= Math.pow(0.96, dt * 60);
+      particle.life -= dt;
+    }
+    this.frictionParticles = this.frictionParticles.filter((particle) => particle.life > 0);
+
+    const velocityX = this.prediction.vx;
+    const previousSpeed = Math.abs(this.lastPredictedVelocityX);
+    const speed = Math.abs(velocityX);
+    const lostSpeed = previousSpeed - speed;
+    const onCrystal = local.grounded && this.supportTexture(local) === "crystal";
+    const now = performance.now();
+    if (onCrystal && previousSpeed > 65 && lostSpeed > 4 && now - this.lastFrictionBurstAt > 55) {
+      this.lastFrictionBurstAt = now;
+      const direction = Math.sign(this.lastPredictedVelocityX) || 1;
+      const intensity = Math.min(1, previousSpeed / PHYSICS.MAX_RUN_SPEED);
+      const count = 2 + Math.round(intensity * 3);
+      const feetY = this.prediction.y + PHYSICS.PLAYER_HEIGHT / 2 - 2;
+      for (let index = 0; index < count && this.frictionParticles.length < 70; index++) {
+        const life = 0.28 + Math.random() * 0.25;
+        this.frictionParticles.push({
+          x: this.prediction.x - direction * (PHYSICS.PLAYER_WIDTH * 0.28) + (Math.random() - 0.5) * 10,
+          y: feetY - Math.random() * 5,
+          velocityX: -direction * (25 + Math.random() * 75) + (Math.random() - 0.5) * 28,
+          velocityY: -(25 + Math.random() * 70) * (0.65 + intensity * 0.55),
+          life,
+          maxLife: life,
+          size: 2.5 + Math.random() * 4.5 * intensity,
+        });
+      }
+    }
+    this.lastPredictedVelocityX = velocityX;
+  }
+
+  private drawFrictionParticles(g: Phaser.GameObjects.Graphics): void {
+    for (const particle of this.frictionParticles) {
+      const progress = particle.life / particle.maxLife;
+      const size = particle.size * (1.15 - progress * 0.25);
+      g.fillStyle(0xeafcff, Math.min(0.78, progress * 0.9)).fillCircle(particle.x, particle.y, size);
+      if (size > 4) {
+        g.fillStyle(0xa9e9f5, progress * 0.32).fillCircle(particle.x - size * 0.45, particle.y + 1, size * 0.65);
+      }
+    }
+  }
+
   private renderWorld(): void {
     const snapshot = this.latest!;
     const g = this.graphics.clear();
     this.drawEnvironment(g);
+    this.drawAuthoredFeatures(g);
 
     const visiblePlatformIds = new Set<string>();
     for (const object of snapshot.objects) {
@@ -107,11 +233,13 @@ export class GameScene extends Phaser.Scene {
       const left = rendered.x - rendered.width / 2;
       const top = rendered.y - rendered.height / 2;
       if (rendered.kind === "platform") {
-        if (rendered.id.startsWith("moving:")) this.drawMovingPlatform(g, left, top, rendered.width, rendered.height);
-        else if (this.syncPlatformImage(rendered.id, left, top, rendered.width, rendered.height)) {
+        const definition = this.definitionForSnapshot(rendered.id);
+        const texture = definition?.texture ?? (rendered.id.startsWith("moving:") ? "metal" : "grass");
+        if (rendered.id.startsWith("moving:")) this.drawTexturedPlatform(g, left, top, rendered.width, rendered.height, texture, true);
+        else if (texture === "grass" && this.syncPlatformImage(rendered.id, left, top, rendered.width, rendered.height)) {
           visiblePlatformIds.add(rendered.id);
         } else {
-          this.drawStonePlatform(g, left, top, rendered.width, rendered.height);
+          this.drawTexturedPlatform(g, left, top, rendered.width, rendered.height, texture, false);
         }
       } else {
         this.drawCrate(g, left, top, rendered.width, rendered.height);
@@ -125,14 +253,122 @@ export class GameScene extends Phaser.Scene {
 
     if (!snapshot.keyState.collected) this.drawKey(g, snapshot.keyState.x, snapshot.keyState.y);
     this.drawDoor(g, snapshot);
+    this.drawFrictionParticles(g);
     for (const player of snapshot.players) this.drawPlayer(g, player.id);
     this.drawTeamCharge(g, snapshot);
   }
 
+  private configureMap(): void {
+    const map = this.network.activeMap;
+    if (!map || this.currentMap?.id === map.id) return;
+    this.currentMap = map;
+    this.cameras.main.setBounds(0, 0, map.width, map.height);
+    this.background?.destroy();
+    this.background = undefined;
+    if (map.background.preset === "forest" && this.textures.exists(GameScene.BACKGROUND_KEY)) {
+      this.background = this.add.image(0, 0, GameScene.BACKGROUND_KEY).setOrigin(0).setScrollFactor(0).setDepth(-10);
+      this.coverBackground();
+    } else if (map.background.preset === "custom" && map.background.value) {
+      const mapId = map.id;
+      const textureKey = `custom-map-background:${mapId}`;
+      const source = new Image();
+      source.onload = () => {
+        if (this.currentMap?.id !== mapId) return;
+        if (!this.textures.exists(textureKey)) this.textures.addImage(textureKey, source);
+        this.background?.destroy();
+        this.background = this.add.image(0, 0, textureKey).setOrigin(0).setScrollFactor(0).setDepth(-10);
+        this.coverBackground();
+      };
+      source.src = map.background.value;
+    }
+  }
+
+  private definitionForSnapshot(snapshotId: string): EditableMapObject | undefined {
+    const separator = snapshotId.indexOf(":");
+    const authoredId = separator >= 0 ? snapshotId.slice(separator + 1) : snapshotId;
+    return this.currentMap?.objects.find((object) => object.id === authoredId);
+  }
+
+  private drawAuthoredFeatures(g: Phaser.GameObjects.Graphics): void {
+    for (const object of this.currentMap?.objects ?? []) {
+      const left = object.x - object.width / 2;
+      const top = object.y - object.height / 2;
+      if (object.kind === "deathZone") {
+        g.fillStyle(0x8f263d, 0.62).fillRect(left, top, object.width, object.height);
+        g.lineStyle(3, 0xff637d, 0.85).strokeRect(left, top, object.width, object.height);
+        for (let x = left - object.height; x < left + object.width; x += 28) {
+          g.lineStyle(8, 0x28121d, 0.7).lineBetween(x, top + object.height, x + object.height, top);
+        }
+      } else if (object.kind === "checkpoint") {
+        g.lineStyle(5, 0x334355, 1).lineBetween(object.x, object.y + object.height / 2, object.x, object.y - object.height / 2);
+        g.fillStyle(0x49dcb1, 0.9).fillTriangle(
+          object.x + 2, object.y - object.height / 2,
+          object.x + object.width, object.y - object.height / 2 + 14,
+          object.x + 2, object.y - object.height / 2 + 28
+        );
+      } else if (object.kind === "decoration") {
+        g.fillStyle(this.textureColor(object.texture), 0.48).fillRoundedRect(left, top, object.width, object.height, 8);
+        g.lineStyle(2, 0xffffff, 0.35).strokeRoundedRect(left, top, object.width, object.height, 8);
+      }
+    }
+  }
+
+  private textureColor(texture: MapTexture): number {
+    return ({
+      grass: 0x5e9f35, stone: 0x667085, wood: 0x9a6338, metal: 0x8491a5,
+      crystal: 0x4fd8dc, hazard: 0xd9415c, custom: 0x8e72d9,
+    } as const)[texture];
+  }
+
+  private drawTexturedPlatform(
+    g: Phaser.GameObjects.Graphics,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    texture: MapTexture,
+    moving: boolean
+  ): void {
+    if (moving || texture === "metal") return this.drawMovingPlatform(g, x, y, width, height);
+    if (texture === "grass") return this.drawStonePlatform(g, x, y, width, height);
+    if (texture === "wood") {
+      g.fillStyle(0x8b562f).fillRoundedRect(x, y, width, height, 5);
+      g.lineStyle(3, 0x5f351f, 0.9).strokeRoundedRect(x, y, width, height, 5);
+      for (let xx = x + 24; xx < x + width; xx += 32) g.lineBetween(xx, y + 2, xx, y + height - 2);
+      return;
+    }
+    if (texture === "hazard") {
+      g.fillStyle(0xc53c55).fillRect(x, y, width, height);
+      for (let xx = x - height; xx < x + width; xx += 30) {
+        g.lineStyle(9, 0x2b1720, 0.8).lineBetween(xx, y + height, xx + height, y);
+      }
+      return;
+    }
+    const color = this.textureColor(texture);
+    g.fillStyle(color, 0.95).fillRoundedRect(x, y, width, height, 5);
+    g.lineStyle(3, texture === "crystal" ? 0xb9ffff : 0x313848, 0.9).strokeRoundedRect(x, y, width, height, 5);
+    if (texture === "crystal") {
+      for (let xx = x + 12; xx < x + width; xx += 28) g.lineStyle(2, 0xffffff, 0.3).lineBetween(xx, y + 3, xx + 10, y + height - 3);
+    }
+  }
+
   private drawEnvironment(g: Phaser.GameObjects.Graphics): void {
     if (this.background) return;
+    const worldWidth = this.currentMap?.width ?? 2700;
+    const worldHeight = this.currentMap?.height ?? 800;
+    const preset = this.currentMap?.background.preset ?? "sky";
+    if (preset === "solid") {
+      g.fillStyle(0x5672a0).fillRect(0, 0, worldWidth, worldHeight);
+      return;
+    }
+    if (preset === "night") {
+      g.fillGradientStyle(0x0b1024, 0x0b1024, 0x273b62, 0x273b62, 1).fillRect(0, 0, worldWidth, worldHeight);
+      g.fillStyle(0xfff1b6, 0.9).fillCircle(worldWidth * 0.78, 110, 42);
+      for (let x = 80; x < worldWidth; x += 170) g.fillStyle(0xffffff, 0.75).fillCircle(x, 55 + (x % 120), 2);
+      return;
+    }
     // Layered daylight landscape with depth cues inspired by the reference.
-    g.fillGradientStyle(0x20aeea, 0x20aeea, 0xbcefff, 0xbcefff, 1).fillRect(0, 0, 2700, 800);
+    g.fillGradientStyle(0x20aeea, 0x20aeea, 0xbcefff, 0xbcefff, 1).fillRect(0, 0, worldWidth, worldHeight);
     g.fillStyle(0xffffff, 0.9);
     for (const [x, y, scale] of [[120, 105, 1], [570, 155, .75], [1040, 88, 1.1], [1590, 145, .7], [2040, 92, .9]] as const) {
       g.fillEllipse(x, y, 150 * scale, 38 * scale).fillCircle(x - 48 * scale, y - 8 * scale, 28 * scale)
@@ -140,16 +376,16 @@ export class GameScene extends Phaser.Scene {
     }
     // Distant mountains and mist.
     g.fillStyle(0x7ac9db, 0.5);
-    for (let x = -120; x < 2300; x += 310) g.fillTriangle(x, 470, x + 155, 255 + (x % 3) * 20, x + 330, 470);
+    for (let x = -120; x < worldWidth; x += 310) g.fillTriangle(x, 470, x + 155, 255 + (x % 3) * 20, x + 330, 470);
     g.fillStyle(0xa9dfd2, 0.72);
-    for (let x = -80; x < 2300; x += 180) g.fillCircle(x, 470, 115).fillCircle(x + 70, 450, 90);
+    for (let x = -80; x < worldWidth; x += 180) g.fillCircle(x, 470, 115).fillCircle(x + 70, 450, 90);
     g.fillStyle(0x4fae7b, 0.55);
-    for (let x = 20; x < 2700; x += 105) {
+    for (let x = 20; x < worldWidth; x += 105) {
       const h = 52 + (x % 70);
       g.fillStyle(0x356f5b, 0.45).fillRect(x - 6, 525 - h, 12, h + 80);
       g.fillStyle(0x4fae7b, 0.62).fillCircle(x, 515 - h, 42).fillCircle(x - 28, 528 - h, 31).fillCircle(x + 29, 528 - h, 34);
     }
-    g.fillStyle(0x2d7658, 0.32).fillRect(0, 545, 2700, 255);
+    g.fillStyle(0x2d7658, 0.32).fillRect(0, 545, worldWidth, Math.max(255, worldHeight - 545));
     // Foreground foliage silhouettes frame the play field without hiding collision surfaces.
     g.fillStyle(0x173f38, 0.8);
     for (const x of [25, 75, 145, 2060, 2125, 2180]) {
@@ -412,6 +648,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
+    void gameAudio.unlock();
     this.pressed.add(event.code);
     if (event.code === "F3") {
       event.preventDefault();
@@ -438,5 +675,8 @@ export class GameScene extends Phaser.Scene {
     this.scale.off(Phaser.Scale.Events.RESIZE, this.coverBackground, this);
     for (const image of this.platformImages.values()) image.destroy();
     this.platformImages.clear();
+    this.previousSnapshot = undefined;
+    this.frictionParticles = [];
+    this.lastPredictedVelocityX = 0;
   };
 }
