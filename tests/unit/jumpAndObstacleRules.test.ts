@@ -41,7 +41,7 @@ function obstacleWorld(local: PlayerSnapshot): GameSnapshot {
   const groundTop = 625;
   const obstacleTop = groundTop - PHYSICS.PLAYER_HEIGHT;
   return {
-    serverTick: 1, serverTime: 0, players: [local], ropes: [], teamCharge: { current: 6, max: 6 },
+    serverTick: 1, serverTime: 0, players: [local], ropes: [],
     objects: [
       { id: "ground", kind: "platform", x: 100, y: 650, width: 240, height: 50, velocityX: 0, velocityY: 0 },
       { id: "full-height-step", kind: "platform", x: 200, y: obstacleTop + 20, width: 120, height: 40, velocityX: 0, velocityY: 0 },

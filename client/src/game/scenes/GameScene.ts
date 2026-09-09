@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import {
-  PHYSICS, type EditableMapDefinition, type EditableMapObject, type GameSnapshot, type MapTexture, type PlayerInput
+  PHYSICS, type EditableMapDefinition, type EditableMapObject, type GameSnapshot, type MapTexture,
+  type PlayerContactEvent, type PlayerInput
 } from "@tetherbound/shared";
 import type { SocketClient } from "../../network/SocketClient";
 import { SnapshotBuffer } from "../../network/SnapshotBuffer";
@@ -8,6 +9,7 @@ import { ClientPrediction } from "../../network/ClientPrediction";
 import { InputController } from "../../input/InputController";
 import { CLIENT_CONFIG } from "../../config/clientConfig";
 import { gameAudio } from "../../audio/GameAudio";
+import { paintCrystalMaterial } from "../rendering/crystalMaterial";
 
 interface FrictionParticle {
   x: number;
@@ -21,9 +23,8 @@ interface FrictionParticle {
 
 export class GameScene extends Phaser.Scene {
   private static readonly BACKGROUND_KEY = "level-background";
-  private static readonly BACKGROUND_URL = "/assets/game/forest-background.png";
-  private static readonly PLATFORM_KEY = "stone-grass-platform";
-  private static readonly PLATFORM_URL = "/assets/game/stone-grass-platform.png";
+  private static readonly BACKGROUND_URL = "/assets/game/ice-background.png";
+  private static readonly PLATFORM_KEY = "crystal-surface-v1";
   private readonly snapshots = new SnapshotBuffer();
   private readonly prediction = new ClientPrediction();
   private readonly pressed = new Set<string>();
@@ -38,6 +39,7 @@ export class GameScene extends Phaser.Scene {
   private pingTimer?: ReturnType<typeof setInterval>;
   private background?: Phaser.GameObjects.Image;
   private readonly platformImages = new Map<string, Phaser.GameObjects.Image>();
+  private readonly crystalTextureKeys = new Set<string>();
   private currentMap?: EditableMapDefinition;
   private previousSnapshot?: GameSnapshot;
   private lastFootstepAt = 0;
@@ -45,6 +47,7 @@ export class GameScene extends Phaser.Scene {
   private lastPredictedVelocityX = 0;
   private lastFrictionBurstAt = 0;
   private frictionParticles: FrictionParticle[] = [];
+  private readonly contactFlashUntil = new Map<string, number>();
 
   constructor(private readonly network: SocketClient, private readonly debugElement: HTMLElement) {
     super("GameScene");
@@ -54,7 +57,6 @@ export class GameScene extends Phaser.Scene {
     // Vite serves files below client/public from the site root. If the optional
     // raster is unavailable Phaser simply keeps the procedural fallback below.
     this.load.image(GameScene.BACKGROUND_KEY, GameScene.BACKGROUND_URL);
-    this.load.image(GameScene.PLATFORM_KEY, GameScene.PLATFORM_URL);
   }
 
   create(): void {
@@ -66,13 +68,14 @@ export class GameScene extends Phaser.Scene {
         .setScrollFactor(0)
         .setDepth(-10);
       this.coverBackground();
-      this.scale.on(Phaser.Scale.Events.RESIZE, this.coverBackground, this);
     }
-    // Dynamic gameplay graphics stay above the persistent raster platform visuals.
+    this.scale.on(Phaser.Scale.Events.RESIZE, this.coverBackground, this);
+    // Dynamic gameplay graphics stay above the cached crystal surface visuals.
     this.graphics = this.add.graphics().setDepth(10);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
     this.network.socket.on("game:snapshot", this.onSnapshot);
+    this.network.socket.on("game:playerContact", this.onPlayerContact);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.onShutdown);
     this.measureRtt();
     this.pingTimer = setInterval(() => this.measureRtt(), 2000);
@@ -120,9 +123,21 @@ export class GameScene extends Phaser.Scene {
     this.configureMap();
     this.processAudioTransitions(snapshot);
     this.latest = snapshot;
+    const activeIds = new Set(snapshot.players.map((player) => player.id));
+    for (const [id, until] of this.contactFlashUntil) {
+      if (until <= snapshot.serverTime || !activeIds.has(id)) this.contactFlashUntil.delete(id);
+    }
     this.snapshots.push(snapshot);
     const local = snapshot.players.find((p) => p.id === this.network.playerId);
     if (local) this.predictionError = this.prediction.reconcile(local, snapshot);
+  };
+
+  private onPlayerContact = (contact: PlayerContactEvent): void => {
+    // Use server time so delayed delivery never stretches the effect and both
+    // clients render the same counted contact window.
+    const until = contact.occurredAt + 520;
+    this.contactFlashUntil.set(contact.playerA.id, until);
+    this.contactFlashUntil.set(contact.playerB.id, until);
   };
 
   private processAudioTransitions(snapshot: GameSnapshot): void {
@@ -235,11 +250,17 @@ export class GameScene extends Phaser.Scene {
       if (rendered.kind === "platform") {
         const definition = this.definitionForSnapshot(rendered.id);
         const texture = definition?.texture ?? (rendered.id.startsWith("moving:") ? "metal" : "grass");
-        if (rendered.id.startsWith("moving:")) this.drawTexturedPlatform(g, left, top, rendered.width, rendered.height, texture, true);
-        else if (texture === "grass" && this.syncPlatformImage(rendered.id, left, top, rendered.width, rendered.height)) {
+        if (texture !== "hazard" && this.syncPlatformImage(rendered.id, left, top, rendered.width, rendered.height)) {
           visiblePlatformIds.add(rendered.id);
+          if (rendered.id.startsWith("moving:")) {
+            // Small warm end markers distinguish moving platforms from static ice.
+            const radius = Math.min(2.5, rendered.width / 8, rendered.height / 6);
+            g.fillStyle(0xffdf8a, 0.95)
+              .fillCircle(left + radius * 2, top + rendered.height / 2, radius)
+              .fillCircle(left + rendered.width - radius * 2, top + rendered.height / 2, radius);
+          }
         } else {
-          this.drawTexturedPlatform(g, left, top, rendered.width, rendered.height, texture, false);
+          this.drawTexturedPlatform(g, left, top, rendered.width, rendered.height, texture);
         }
       } else {
         this.drawCrate(g, left, top, rendered.width, rendered.height);
@@ -251,11 +272,18 @@ export class GameScene extends Phaser.Scene {
       this.platformImages.delete(id);
     }
 
+    const usedTextures = new Set([...this.platformImages.values()].map((image) => image.texture.key));
+    for (const key of this.crystalTextureKeys) {
+      if (!usedTextures.has(key)) {
+        this.textures.remove(key);
+        this.crystalTextureKeys.delete(key);
+      }
+    }
+
     if (!snapshot.keyState.collected) this.drawKey(g, snapshot.keyState.x, snapshot.keyState.y);
     this.drawDoor(g, snapshot);
     this.drawFrictionParticles(g);
     for (const player of snapshot.players) this.drawPlayer(g, player.id);
-    this.drawTeamCharge(g, snapshot);
   }
 
   private configureMap(): void {
@@ -263,24 +291,9 @@ export class GameScene extends Phaser.Scene {
     if (!map || this.currentMap?.id === map.id) return;
     this.currentMap = map;
     this.cameras.main.setBounds(0, 0, map.width, map.height);
-    this.background?.destroy();
-    this.background = undefined;
-    if (map.background.preset === "forest" && this.textures.exists(GameScene.BACKGROUND_KEY)) {
-      this.background = this.add.image(0, 0, GameScene.BACKGROUND_KEY).setOrigin(0).setScrollFactor(0).setDepth(-10);
-      this.coverBackground();
-    } else if (map.background.preset === "custom" && map.background.value) {
-      const mapId = map.id;
-      const textureKey = `custom-map-background:${mapId}`;
-      const source = new Image();
-      source.onload = () => {
-        if (this.currentMap?.id !== mapId) return;
-        if (!this.textures.exists(textureKey)) this.textures.addImage(textureKey, source);
-        this.background?.destroy();
-        this.background = this.add.image(0, 0, textureKey).setOrigin(0).setScrollFactor(0).setDepth(-10);
-        this.coverBackground();
-      };
-      source.src = map.background.value;
-    }
+    // Gameplay deliberately uses one consistent visual backdrop regardless of
+    // the map preset. Presets and custom images remain map-editor/data concerns.
+    this.coverBackground();
   }
 
   private definitionForSnapshot(snapshotId: string): EditableMapObject | undefined {
@@ -326,17 +339,8 @@ export class GameScene extends Phaser.Scene {
     y: number,
     width: number,
     height: number,
-    texture: MapTexture,
-    moving: boolean
+    texture: MapTexture
   ): void {
-    if (moving || texture === "metal") return this.drawMovingPlatform(g, x, y, width, height);
-    if (texture === "grass") return this.drawStonePlatform(g, x, y, width, height);
-    if (texture === "wood") {
-      g.fillStyle(0x8b562f).fillRoundedRect(x, y, width, height, 5);
-      g.lineStyle(3, 0x5f351f, 0.9).strokeRoundedRect(x, y, width, height, 5);
-      for (let xx = x + 24; xx < x + width; xx += 32) g.lineBetween(xx, y + 2, xx, y + height - 2);
-      return;
-    }
     if (texture === "hazard") {
       g.fillStyle(0xc53c55).fillRect(x, y, width, height);
       for (let xx = x - height; xx < x + width; xx += 30) {
@@ -344,12 +348,9 @@ export class GameScene extends Phaser.Scene {
       }
       return;
     }
-    const color = this.textureColor(texture);
-    g.fillStyle(color, 0.95).fillRoundedRect(x, y, width, height, 5);
-    g.lineStyle(3, texture === "crystal" ? 0xb9ffff : 0x313848, 0.9).strokeRoundedRect(x, y, width, height, 5);
-    if (texture === "crystal") {
-      for (let xx = x + 12; xx < x + width; xx += 28) g.lineStyle(2, 0xffffff, 0.3).lineBetween(xx, y + 3, xx + 10, y + height - 3);
-    }
+    // Canvas allocation failure: retain readable icy surfaces instead of old grass.
+    g.fillStyle(0x287bb2, 0.88).fillRect(x, y, width, height);
+    g.lineStyle(1, 0xc6faff, 0.95).strokeRect(x, y, width, height);
   }
 
   private drawEnvironment(g: Phaser.GameObjects.Graphics): void {
@@ -394,51 +395,6 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private drawStonePlatform(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number): void {
-    g.fillStyle(0x3a241d, 0.24).fillRoundedRect(x + 4, y + 5, w, h, 6);
-    g.fillStyle(0x70432f).fillRoundedRect(x, y, w, h, 5);
-    g.lineStyle(2, 0x352119, 0.95).strokeRoundedRect(x, y, w, h, 5);
-    const rowH = 22;
-    for (let row = 0; row * rowH < h; row++) {
-      const yy = y + row * rowH;
-      const offset = row % 2 ? 18 : 0;
-      g.lineStyle(2, 0x45291f, 0.8).lineBetween(x + 2, yy, x + w - 2, yy);
-      for (let xx = x + offset + 34; xx < x + w - 2; xx += 42) {
-        g.lineBetween(xx, yy, xx - 2, Math.min(y + h, yy + rowH));
-      }
-      // Small deterministic highlights break the flat brick pattern without
-      // introducing frame-to-frame flicker.
-      g.lineStyle(1, 0xa66a49, 0.45);
-      for (let xx = x + 9 + offset; xx < x + w - 8; xx += 42) {
-        const end = Math.min(x + w - 5, xx + 17);
-        g.lineBetween(xx, yy + 6, end, yy + 4);
-      }
-    }
-    // Bright, irregular grass cap echoes the reference while collision geometry stays untouched.
-    g.fillStyle(0x285f1c).fillRoundedRect(x - 1, y - 1, w + 2, Math.min(14, h + 2), 5);
-    g.fillStyle(0x65a923).fillRoundedRect(x, y - 5, w, 9, 4);
-    g.lineStyle(2, 0x9bd43a, 0.9).lineBetween(x + 4, y - 4, x + w - 4, y - 4);
-    for (let xx = x + 8; xx < x + w - 5; xx += 18) {
-      const blade = 4 + ((xx * 7) % 7);
-      g.fillTriangle(xx - 3, y, xx, y - blade, xx + 4, y);
-    }
-    if (h > 28 && w > 55) {
-      g.lineStyle(3, 0x367a28, 0.9);
-      for (let xx = x + 24; xx < x + w; xx += 92) {
-        g.lineBetween(xx, y + 5, xx + 2, Math.min(y + h - 3, y + 25));
-        g.fillStyle(0x4b9b31).fillCircle(xx - 3, y + 17, 4).fillCircle(xx + 6, y + 27, 4);
-      }
-    }
-  }
-
-  private drawMovingPlatform(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number): void {
-    g.fillStyle(0x4b3223).fillRoundedRect(x - 4, y - 3, w + 8, h + 6, 7);
-    g.fillStyle(0xb97831).fillRoundedRect(x, y, w, h, 5);
-    g.lineStyle(2, 0xf0b44e, 0.8).strokeRoundedRect(x + 2, y + 2, w - 4, h - 4, 4);
-    for (let xx = x + 18; xx < x + w; xx += 30) g.lineStyle(2, 0x77431f, .7).lineBetween(xx, y + 2, xx, y + h - 2);
-    g.fillStyle(0xf6c453).fillCircle(x + 12, y + h / 2, 4).fillCircle(x + w - 12, y + h / 2, 4);
-  }
-
   private drawCrate(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number): void {
     g.fillStyle(0x6e3d20).fillRoundedRect(x, y, w, h, 5);
     g.fillStyle(0xb96d2d).fillRoundedRect(x + 4, y + 4, w - 8, h - 8, 2);
@@ -454,10 +410,32 @@ export class GameScene extends Phaser.Scene {
       ? 0
       : Phaser.Math.Clamp((this.latest!.serverTime - player.exitedAt) / 500, 0, 1);
     const scale = 1 - exitProgress;
-    const alpha = (player.connected ? (player.state === "Dead" ? 0.2 : 1) : 0.38) * scale;
+    const serverNow = this.latest!.serverTime;
+    const flashRemaining = (this.contactFlashUntil.get(id) ?? 0) - serverNow;
+    const electrocuted = (player.electrocutedUntil ?? 0) > serverNow;
+    const alpha = (player.connected ? (player.state === "Dead" && !electrocuted ? 0.2 : 1) : 0.38) * scale;
     if (scale <= 0) {
       return;
     }
+    if (flashRemaining > 0) {
+      const progress = Phaser.Math.Clamp(flashRemaining / 520, 0, 1);
+      const pulse = 1 + Math.sin((1 - progress) * Math.PI * 5) * 0.12;
+      g.fillStyle(0xfff36b, 0.16 + progress * 0.22)
+        .fillCircle(pos.x, pos.y, 35 * pulse);
+      g.lineStyle(3 + progress * 3, 0x6fffff, 0.5 + progress * 0.4)
+        .strokeCircle(pos.x, pos.y, 27 * pulse);
+      for (let ray = 0; ray < 6; ray++) {
+        const angle = ray * Math.PI / 3 + serverNow * 0.006;
+        g.lineStyle(2, ray % 2 ? 0xff4ff3 : 0xfff36b, progress)
+          .lineBetween(pos.x + Math.cos(angle) * 27, pos.y + Math.sin(angle) * 27,
+            pos.x + Math.cos(angle) * 34, pos.y + Math.sin(angle) * 34);
+      }
+    }
+    const shockPhase = serverNow * 0.035 + this.playerSeed(id);
+    const shockX = electrocuted ? Math.sin(shockPhase * 1.7) * 3 : 0;
+    const shockY = electrocuted ? Math.cos(shockPhase * 2.1) * 2 : 0;
+    pos.x += shockX;
+    pos.y += shockY;
     const left = pos.x - PHYSICS.PLAYER_WIDTH / 2;
     const top = pos.y - PHYSICS.PLAYER_HEIGHT / 2;
     g.fillStyle(0x17222a, .22 * alpha).fillEllipse(pos.x + 2, pos.y + PHYSICS.PLAYER_HEIGHT / 2 + 4, 38 * scale, 9 * scale);
@@ -473,7 +451,13 @@ export class GameScene extends Phaser.Scene {
       .strokeRoundedRect(left, top + 5, PHYSICS.PLAYER_WIDTH, PHYSICS.PLAYER_HEIGHT - 5, 10);
     const facing = player.facing === "right" ? 1 : -1;
     const eyeX = pos.x + facing * 7;
-    if (player.state === "Dead") {
+    if (electrocuted) {
+      // Fatal pair contacts override facing: both characters look at camera.
+      g.fillStyle(0xffffff, 1).fillEllipse(pos.x - 8, pos.y - 7, 12, 18).fillEllipse(pos.x + 8, pos.y - 7, 12, 18);
+      g.fillStyle(0x18212a, 1).fillCircle(pos.x - 8, pos.y - 6, 3.5).fillCircle(pos.x + 8, pos.y - 6, 3.5);
+      g.lineStyle(2, 0x18212a, 1).strokeEllipse(pos.x, pos.y + 9, 9, 11);
+      this.drawElectricity(g, pos.x, pos.y, shockPhase);
+    } else if (player.state === "Dead") {
       // Uneven crossed eyes make the requested `( X x )` death face readable:
       // the left mark is deliberately larger than the right one.
       g.lineStyle(3, 0x18212a, 1)
@@ -489,24 +473,27 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(2, 0x38251d, alpha).lineBetween(pos.x + facing * 4, pos.y + 7, pos.x + facing * 9, pos.y + 8);
   }
 
-  private drawTeamCharge(g: Phaser.GameObjects.Graphics, snapshot: GameSnapshot): void {
-    const width = Math.min(620, this.scale.width * 0.62);
-    const height = 76;
-    const x = this.cameras.main.scrollX + (this.scale.width - width) / 2;
-    const y = 64;
-    const gap = 10;
-    const padding = 12;
-    const maxCharge = Math.max(1, snapshot.teamCharge.max);
-    const segmentWidth = (width - padding * 2 - gap * (maxCharge - 1)) / maxCharge;
-    g.fillStyle(0x07131e, 0.88).fillRoundedRect(x, y, width, height, 18);
-    g.lineStyle(4, 0xffffff, 0.9).strokeRoundedRect(x, y, width, height, 18);
-    for (let index = 0; index < maxCharge; index++) {
-      const filled = index < snapshot.teamCharge.current;
-      const sx = x + padding + index * (segmentWidth + gap);
-      g.fillStyle(filled ? 0x62e36e : 0x3b4650, filled ? 1 : 0.7)
-        .fillRoundedRect(sx, y + padding, segmentWidth, height - padding * 2, 12);
-      g.lineStyle(3, filled ? 0xc9ffd0 : 0x78828b, 1)
-        .strokeRoundedRect(sx, y + padding, segmentWidth, height - padding * 2, 12);
+  private playerSeed(id: string): number {
+    let seed = 0;
+    for (let i = 0; i < id.length; i++) seed = (seed * 31 + id.charCodeAt(i)) | 0;
+    return Math.abs(seed % 997);
+  }
+
+  private drawElectricity(g: Phaser.GameObjects.Graphics, x: number, y: number, phase: number): void {
+    g.fillStyle(0x55eaff, 0.16).fillCircle(x, y, 39 + Math.sin(phase) * 3);
+    for (let bolt = 0; bolt < 4; bolt++) {
+      const angle = bolt * Math.PI / 2 + phase * 0.08;
+      let px = x + Math.cos(angle) * 20;
+      let py = y + Math.sin(angle) * 24;
+      g.lineStyle(3, bolt % 2 ? 0xfff45c : 0x6ffcff, 0.95).beginPath().moveTo(px, py);
+      for (let segment = 1; segment <= 3; segment++) {
+        const radius = 20 + segment * 9;
+        const jitter = Math.sin(phase + bolt * 4 + segment * 7) * 5;
+        px = x + Math.cos(angle) * radius + Math.cos(angle + Math.PI / 2) * jitter;
+        py = y + Math.sin(angle) * radius + Math.sin(angle + Math.PI / 2) * jitter;
+        g.lineTo(px, py);
+      }
+      g.strokePath();
     }
   }
 
@@ -552,10 +539,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private syncPlatformImage(id: string, x: number, y: number, width: number, height: number): boolean {
-    if (!this.textures.exists(GameScene.PLATFORM_KEY)) return false;
-
-    const pixelWidth = Math.max(1, Math.ceil(width));
-    const pixelHeight = Math.max(1, Math.ceil(height));
+    // Bound individual GPU texture allocation while preserving the surface aspect ratio.
+    const scale = Math.min(1, 2048 / Math.max(width, height));
+    const pixelWidth = Math.max(1, Math.ceil(width * scale));
+    const pixelHeight = Math.max(1, Math.ceil(height * scale));
     const textureKey = `${GameScene.PLATFORM_KEY}:${pixelWidth}x${pixelHeight}`;
     if (!this.textures.exists(textureKey)) {
       this.createPlatformTexture(textureKey, pixelWidth, pixelHeight);
@@ -576,34 +563,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createPlatformTexture(textureKey: string, width: number, height: number): void {
-    const source = this.textures.get(GameScene.PLATFORM_KEY).getSourceImage() as HTMLImageElement;
-    const sourceWidth = source.naturalWidth || source.width;
-    const sourceHeight = source.naturalHeight || source.height;
-    if (!sourceWidth || !sourceHeight) return;
-
-    // Crop with "cover" semantics. Vertical crops are anchored at the top so
-    // every short platform preserves the grass cap from the source artwork.
-    const targetAspect = width / height;
-    const sourceAspect = sourceWidth / sourceHeight;
-    let sourceX = 0;
-    let sourceY = 0;
-    let cropWidth = sourceWidth;
-    let cropHeight = sourceHeight;
-    if (sourceAspect > targetAspect) {
-      cropWidth = sourceHeight * targetAspect;
-      sourceX = (sourceWidth - cropWidth) / 2;
-    } else {
-      cropHeight = sourceWidth / targetAspect;
-    }
-
     const texture = this.textures.createCanvas(textureKey, width, height);
     if (!texture) return;
-    texture.getContext().drawImage(
-      source,
-      sourceX, sourceY, cropWidth, cropHeight,
-      0, 0, width, height
-    );
+    paintCrystalMaterial(texture.getContext(), width, height);
     texture.refresh();
+    this.crystalTextureKeys.add(textureKey);
   }
 
   private coverBackground(): void {
@@ -641,7 +605,6 @@ export class GameScene extends Phaser.Scene {
       `velocity        ${local ? `${local.velocityX.toFixed(0)}, ${local.velocityY.toFixed(0)}` : "-"}`,
       `state           ${local?.state ?? "-"}`,
       `grounded        ${local?.grounded ?? false}`,
-      `team charge     ${this.latest!.teamCharge.current}/${this.latest!.teamCharge.max}`,
       `substeps        ${PHYSICS.PHYSICS_SUBSTEPS}`,
       `players         ${this.latest!.players.length}`,
     ].join("\n");
@@ -670,13 +633,17 @@ export class GameScene extends Phaser.Scene {
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     this.network.socket.off("game:snapshot", this.onSnapshot);
+    this.network.socket.off("game:playerContact", this.onPlayerContact);
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = undefined;
     this.scale.off(Phaser.Scale.Events.RESIZE, this.coverBackground, this);
     for (const image of this.platformImages.values()) image.destroy();
     this.platformImages.clear();
+    for (const key of this.crystalTextureKeys) this.textures.remove(key);
+    this.crystalTextureKeys.clear();
     this.previousSnapshot = undefined;
     this.frictionParticles = [];
+    this.contactFlashUntil.clear();
     this.lastPredictedVelocityX = 0;
   };
 }

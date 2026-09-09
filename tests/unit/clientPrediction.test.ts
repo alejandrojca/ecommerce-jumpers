@@ -32,7 +32,7 @@ const world = (local: PlayerSnapshot, others: PlayerSnapshot[] = []): GameSnapsh
   serverTick: 1,
   serverTime: 1000,
   players: [local, ...others],
-  ropes: [], teamCharge: { current: 6, max: 6 },
+  ropes: [],
   objects: [{
     id: "platform:start", kind: "platform", x: 200, y: 650, width: 400, height: 50,
     velocityX: 0, velocityY: 0

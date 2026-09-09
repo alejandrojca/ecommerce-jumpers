@@ -15,7 +15,7 @@ interface RuntimePlayer {
 interface GameInternals {
   engine: Matter.Engine;
   players: Map<string, RuntimePlayer>;
-  teamCharge: number;
+  playerPairCollisionCounts: Map<string, number>;
   enterExit(player: RuntimePlayer, now: number): void;
 }
 
@@ -38,7 +38,7 @@ function expectStillExited(game: ServerGame, exited: RuntimePlayer, exitedAt: nu
 describe("exited players remain outside the match during respawns", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("does not restore an exited player after charge depletion", () => {
+  it("does not restore an exited player after a pair collision death", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-31T12:00:00Z"));
     const now = Date.now();
@@ -47,7 +47,7 @@ describe("exited players remain outside the match during respawns", () => {
     game.addPlayer("a", "A", 2);
     game.addPlayer("b", "B", 3);
     const exited = exitPlayer(game, "exited", now);
-    internals(game).teamCharge = 1;
+    internals(game).playerPairCollisionCounts.set("a|b", 2);
     Matter.Body.setPosition(player(game, "a").body, { x: 400, y: 300 });
     Matter.Body.setPosition(player(game, "b").body, { x: 400 + PHYSICS.PLAYER_WIDTH - 2, y: 300 });
     game.step();

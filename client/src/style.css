@@ -35,8 +35,9 @@ button { cursor: pointer; }
   place-items: center;
   padding: 24px;
   background:
-    radial-gradient(circle at 20% 20%, rgba(73,220,177,.16), transparent 30%),
-    radial-gradient(circle at 85% 70%, rgba(113,167,255,.15), transparent 28%);
+    linear-gradient(rgba(8, 24, 48, .18), rgba(8, 24, 48, .32)),
+    url('/assets/game/ice-background.png') center / cover no-repeat,
+    #1475ae;
 }
 .shell[hidden], .hud[hidden] { display: none !important; }
 .card {

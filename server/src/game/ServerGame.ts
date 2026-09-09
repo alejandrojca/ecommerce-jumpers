@@ -31,6 +31,7 @@ interface PlayerRuntime {
   supportBody?: Matter.Body;
   lastValid: { x: number; y: number; vx: number; vy: number };
   exitedAt?: number;
+  electrocutedUntil?: number;
   inWorld: boolean;
   spawnSlot: number;
   crystalMotion: CrystalMotionState;
@@ -94,12 +95,11 @@ export class ServerGame {
   private readonly keyDefinition: EditableMapObject;
   private readonly doorDefinition: EditableMapObject;
   private readonly deathY: number;
-  private static readonly MAX_TEAM_CHARGE = 6;
-  private teamCharge = ServerGame.MAX_TEAM_CHARGE;
+  private static readonly MAX_PAIR_COLLISIONS = 3;
   private readonly touchingPlayerPairs = new Set<string>();
   private readonly playerPairCooldownUntil = new Map<string, number>();
+  private readonly playerPairCollisionCounts = new Map<string, number>();
   private readonly pendingPlayerContacts: PlayerContactEvent[] = [];
-  private collisionDeathActive = false;
   private tick = 0;
   private keyCollected = false;
   private keyHolder?: string;
@@ -236,6 +236,7 @@ export class ServerGame {
     this.players.delete(id);
     for (const key of [...this.touchingPlayerPairs]) if (key.split("|").includes(id)) this.touchingPlayerPairs.delete(key);
     for (const key of [...this.playerPairCooldownUntil.keys()]) if (key.split("|").includes(id)) this.playerPairCooldownUntil.delete(key);
+    for (const key of [...this.playerPairCollisionCounts.keys()]) if (key.split("|").includes(id)) this.playerPairCollisionCounts.delete(key);
   }
 
   acceptInput(id: string, input: PlayerInput): boolean {
@@ -277,11 +278,16 @@ export class ServerGame {
   private updatePlayer(p: PlayerRuntime, now: number, dt: number): void {
     if (p.deadUntil > now) {
       Matter.Body.setVelocity(p.body, { x: 0, y: 0 });
-      if (!this.collisionDeathActive) Matter.Body.setPosition(p.body, { x: -200, y: -200 });
+      // Collision deaths remain visible at the impact point for the
+      // authoritative electrocution window. Void deaths stay hidden.
+      if ((p.electrocutedUntil ?? 0) <= now) Matter.Body.setPosition(p.body, { x: -200, y: -200 });
       return;
     }
     if (p.deadUntil !== 0) {
       p.deadUntil = 0;
+      p.electrocutedUntil = undefined;
+      Matter.Body.setStatic(p.body, false);
+      p.body.isSensor = false;
       p.voidLocked = false;
       p.invulnerableUntil = now + PHYSICS.INVULNERABILITY_AFTER_RESPAWN_MS;
       Matter.Body.setPosition(p.body, p.checkpoint);
@@ -365,10 +371,11 @@ export class ServerGame {
     } else {
       p.lastValid = { x: b.position.x, y: b.position.y, vx: b.velocity.x, vy: b.velocity.y };
     }
-    const checkpoint = this.checkpoints.find((definition) =>
-      Math.abs(b.position.x - definition.x) <= definition.width / 2 + PHYSICS.PLAYER_WIDTH / 2
-      && Math.abs(b.position.y - definition.y) <= definition.height / 2 + PHYSICS.PLAYER_HEIGHT / 2
-    );
+    // Checkpoints are progress lines, not pickups: crossing the flag's X is
+    // sufficient even when the player jumps above its authored sprite bounds.
+    const checkpoint = this.checkpoints
+      .filter((definition) => b.position.x >= definition.x)
+      .sort((a, b) => b.x - a.x)[0];
     if (checkpoint) {
       p.checkpoint = { x: checkpoint.x, y: checkpoint.y };
     }
@@ -433,10 +440,6 @@ export class ServerGame {
   }
 
   private updateTeamRespawn(now: number): void {
-    if (this.collisionDeathActive) {
-      if (now >= this.teamRespawnAt) this.respawnTeamAtStart(now, true);
-      return;
-    }
     const players = [...this.players.values()].filter((player) => player.exitedAt === undefined);
     if (players.length === 0) {
       this.teamRespawnAt = 0;
@@ -460,18 +463,16 @@ export class ServerGame {
       return;
     }
     if (now < this.teamRespawnAt) return;
-    this.respawnTeamAtStart(now, false);
+    this.respawnTeamAtCheckpoints(now);
   }
 
-  private respawnTeamAtStart(now: number, randomizeOrder: boolean): void {
-    if (randomizeOrder) this.randomizeSpawnOrder();
-    const slots = this.spawnSlots;
+  private respawnTeamAtCheckpoints(now: number): void {
     for (const player of this.players.values()) {
       // Crossing the exit is irreversible for the current match. Exited
       // players have deliberately been removed from Matter and must not be
-      // reintroduced by a charge death or a team void respawn.
+      // reintroduced by any death or team void respawn.
       if (player.exitedAt !== undefined) continue;
-      const spawn = slots[player.spawnSlot]!;
+      const spawn = player.checkpoint;
       Matter.Body.setPosition(player.body, spawn);
       Matter.Body.setVelocity(player.body, { x: 0, y: 0 });
       Matter.Body.setAngle(player.body, 0);
@@ -487,7 +488,6 @@ export class ServerGame {
       player.voidLocked = false;
       player.supportedHangingPlayers = 0;
       player.invulnerableUntil = now + PHYSICS.INVULNERABILITY_AFTER_RESPAWN_MS;
-      player.checkpoint = spawn;
       player.lastValid = { x: spawn.x, y: spawn.y, vx: 0, vy: 0 };
       player.crystalMotion = { ...INITIAL_CRYSTAL_MOTION };
       if (!player.inWorld) {
@@ -496,14 +496,11 @@ export class ServerGame {
       }
     }
     this.teamRespawnAt = 0;
-    this.collisionDeathActive = false;
-    this.teamCharge = ServerGame.MAX_TEAM_CHARGE;
     this.touchingPlayerPairs.clear();
     this.playerPairCooldownUntil.clear();
   }
 
   private updatePlayerContacts(now: number): void {
-    if (this.collisionDeathActive) return;
     const current = new Set<string>();
     const eligible = (id: string): boolean => {
       const player = this.players.get(id);
@@ -530,32 +527,46 @@ export class ServerGame {
       const a = this.players.get(aId!);
       const b = this.players.get(bId!);
       if (a && b) {
+        const collisionCount = (this.playerPairCollisionCounts.get(key) ?? 0) + 1;
+        const fatal = collisionCount >= ServerGame.MAX_PAIR_COLLISIONS;
         this.pendingPlayerContacts.push({
           playerA: { id: a.id, name: a.name, color: a.color },
           playerB: { id: b.id, name: b.name, color: b.color },
           occurredAt: now,
+          collisionCount,
+          collisionLimit: ServerGame.MAX_PAIR_COLLISIONS,
+          fatal,
         });
+        if (fatal) {
+          this.playerPairCollisionCounts.delete(key);
+          this.killCollisionPair(a, b, now);
+        } else {
+          this.playerPairCollisionCounts.set(key, collisionCount);
+        }
       }
     }
-    this.teamCharge = Math.max(0, this.teamCharge - entered.length);
-    if (this.teamCharge === 0) this.beginCollisionDeath(now);
   }
 
   drainPlayerContactEvents(): PlayerContactEvent[] {
     return this.pendingPlayerContacts.splice(0);
   }
 
-  private beginCollisionDeath(now: number): void {
-    this.collisionDeathActive = true;
-    this.teamRespawnAt = now + PHYSICS.RESPAWN_DELAY_MS;
-    this.touchingPlayerPairs.clear();
-    this.playerPairCooldownUntil.clear();
-    for (const player of this.players.values()) {
+  private killCollisionPair(a: PlayerRuntime, b: PlayerRuntime, now: number): void {
+    const respawnAt = now + PHYSICS.RESPAWN_DELAY_MS;
+    for (const player of [a, b]) {
       if (!player.connected || !player.inWorld || player.exitedAt !== undefined) continue;
-      player.deadUntil = this.teamRespawnAt;
+      player.deadUntil = respawnAt;
+      player.electrocutedUntil = respawnAt;
       player.input = { ...EMPTY_INPUT, sequence: player.lastSequence };
       Matter.Body.setVelocity(player.body, { x: 0, y: 0 });
+      Matter.Body.setStatic(player.body, true);
+      player.body.isSensor = true;
     }
+    this.touchingPlayerPairs.delete(this.pairKey(a.id, b.id));
+  }
+
+  private pairKey(a: string, b: string): string {
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
   }
 
   private isInsideExit(player: PlayerRuntime): boolean {
@@ -587,6 +598,9 @@ export class ServerGame {
         supportedHangingPlayers: p.supportedHangingPlayers,
         crystalMotion: { ...p.crystalMotion },
         exitedAt: p.exitedAt,
+        electrocutedUntil: p.electrocutedUntil && p.electrocutedUntil > Date.now()
+          ? p.electrocutedUntil
+          : undefined,
         support: p.supportBody ? {
           id: p.supportBody.label,
           topY: p.supportBody.bounds.min.y,
@@ -597,7 +611,6 @@ export class ServerGame {
     });
     return {
       serverTick: this.tick, serverTime: Date.now(), players, ropes: [],
-      teamCharge: { current: this.teamCharge, max: ServerGame.MAX_TEAM_CHARGE },
       objects: [
         ...this.boxes.map((b, i) => ({
           id: b.label, kind: "box" as const, x: b.position.x, y: b.position.y,
@@ -631,10 +644,9 @@ export class ServerGame {
     this.matchStartedAt = Date.now();
     this.exitTimes.clear();
     this.teamRespawnAt = 0;
-    this.teamCharge = ServerGame.MAX_TEAM_CHARGE;
-    this.collisionDeathActive = false;
     this.touchingPlayerPairs.clear();
     this.playerPairCooldownUntil.clear();
+    this.playerPairCollisionCounts.clear();
     this.pendingPlayerContacts.length = 0;
     for (const player of this.players.values()) player.exitedAt = undefined;
     this.randomizeSpawnOrder();
