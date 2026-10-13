@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 import {
   PHYSICS, type EditableMapDefinition, type EditableMapObject, type GameSnapshot, type MapTexture,
-  type PlayerContactEvent, type PlayerInput
+  type PlayerInput
 } from "@tetherbound/shared";
 import type { SocketClient } from "../../network/SocketClient";
 import { SnapshotBuffer } from "../../network/SnapshotBuffer";
@@ -47,7 +47,6 @@ export class GameScene extends Phaser.Scene {
   private lastPredictedVelocityX = 0;
   private lastFrictionBurstAt = 0;
   private frictionParticles: FrictionParticle[] = [];
-  private readonly contactFlashUntil = new Map<string, number>();
 
   constructor(private readonly network: SocketClient, private readonly debugElement: HTMLElement) {
     super("GameScene");
@@ -75,7 +74,6 @@ export class GameScene extends Phaser.Scene {
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
     this.network.socket.on("game:snapshot", this.onSnapshot);
-    this.network.socket.on("game:playerContact", this.onPlayerContact);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.onShutdown);
     this.measureRtt();
     this.pingTimer = setInterval(() => this.measureRtt(), 2000);
@@ -123,21 +121,9 @@ export class GameScene extends Phaser.Scene {
     this.configureMap();
     this.processAudioTransitions(snapshot);
     this.latest = snapshot;
-    const activeIds = new Set(snapshot.players.map((player) => player.id));
-    for (const [id, until] of this.contactFlashUntil) {
-      if (until <= snapshot.serverTime || !activeIds.has(id)) this.contactFlashUntil.delete(id);
-    }
     this.snapshots.push(snapshot);
     const local = snapshot.players.find((p) => p.id === this.network.playerId);
     if (local) this.predictionError = this.prediction.reconcile(local, snapshot);
-  };
-
-  private onPlayerContact = (contact: PlayerContactEvent): void => {
-    // Use server time so delayed delivery never stretches the effect and both
-    // clients render the same counted contact window.
-    const until = contact.occurredAt + 520;
-    this.contactFlashUntil.set(contact.playerA.id, until);
-    this.contactFlashUntil.set(contact.playerB.id, until);
   };
 
   private processAudioTransitions(snapshot: GameSnapshot): void {
@@ -410,32 +396,10 @@ export class GameScene extends Phaser.Scene {
       ? 0
       : Phaser.Math.Clamp((this.latest!.serverTime - player.exitedAt) / 500, 0, 1);
     const scale = 1 - exitProgress;
-    const serverNow = this.latest!.serverTime;
-    const flashRemaining = (this.contactFlashUntil.get(id) ?? 0) - serverNow;
-    const electrocuted = (player.electrocutedUntil ?? 0) > serverNow;
-    const alpha = (player.connected ? (player.state === "Dead" && !electrocuted ? 0.2 : 1) : 0.38) * scale;
+    const alpha = (player.connected ? (player.state === "Dead" ? 0.2 : 1) : 0.38) * scale;
     if (scale <= 0) {
       return;
     }
-    if (flashRemaining > 0) {
-      const progress = Phaser.Math.Clamp(flashRemaining / 520, 0, 1);
-      const pulse = 1 + Math.sin((1 - progress) * Math.PI * 5) * 0.12;
-      g.fillStyle(0xfff36b, 0.16 + progress * 0.22)
-        .fillCircle(pos.x, pos.y, 35 * pulse);
-      g.lineStyle(3 + progress * 3, 0x6fffff, 0.5 + progress * 0.4)
-        .strokeCircle(pos.x, pos.y, 27 * pulse);
-      for (let ray = 0; ray < 6; ray++) {
-        const angle = ray * Math.PI / 3 + serverNow * 0.006;
-        g.lineStyle(2, ray % 2 ? 0xff4ff3 : 0xfff36b, progress)
-          .lineBetween(pos.x + Math.cos(angle) * 27, pos.y + Math.sin(angle) * 27,
-            pos.x + Math.cos(angle) * 34, pos.y + Math.sin(angle) * 34);
-      }
-    }
-    const shockPhase = serverNow * 0.035 + this.playerSeed(id);
-    const shockX = electrocuted ? Math.sin(shockPhase * 1.7) * 3 : 0;
-    const shockY = electrocuted ? Math.cos(shockPhase * 2.1) * 2 : 0;
-    pos.x += shockX;
-    pos.y += shockY;
     const left = pos.x - PHYSICS.PLAYER_WIDTH / 2;
     const top = pos.y - PHYSICS.PLAYER_HEIGHT / 2;
     g.fillStyle(0x17222a, .22 * alpha).fillEllipse(pos.x + 2, pos.y + PHYSICS.PLAYER_HEIGHT / 2 + 4, 38 * scale, 9 * scale);
@@ -451,13 +415,7 @@ export class GameScene extends Phaser.Scene {
       .strokeRoundedRect(left, top + 5, PHYSICS.PLAYER_WIDTH, PHYSICS.PLAYER_HEIGHT - 5, 10);
     const facing = player.facing === "right" ? 1 : -1;
     const eyeX = pos.x + facing * 7;
-    if (electrocuted) {
-      // Fatal pair contacts override facing: both characters look at camera.
-      g.fillStyle(0xffffff, 1).fillEllipse(pos.x - 8, pos.y - 7, 12, 18).fillEllipse(pos.x + 8, pos.y - 7, 12, 18);
-      g.fillStyle(0x18212a, 1).fillCircle(pos.x - 8, pos.y - 6, 3.5).fillCircle(pos.x + 8, pos.y - 6, 3.5);
-      g.lineStyle(2, 0x18212a, 1).strokeEllipse(pos.x, pos.y + 9, 9, 11);
-      this.drawElectricity(g, pos.x, pos.y, shockPhase);
-    } else if (player.state === "Dead") {
+    if (player.state === "Dead") {
       // Uneven crossed eyes make the requested `( X x )` death face readable:
       // the left mark is deliberately larger than the right one.
       g.lineStyle(3, 0x18212a, 1)
@@ -471,30 +429,6 @@ export class GameScene extends Phaser.Scene {
       g.fillStyle(0x18212a, alpha).fillCircle(eyeX + facing, pos.y - 5, 2.5);
     }
     g.lineStyle(2, 0x38251d, alpha).lineBetween(pos.x + facing * 4, pos.y + 7, pos.x + facing * 9, pos.y + 8);
-  }
-
-  private playerSeed(id: string): number {
-    let seed = 0;
-    for (let i = 0; i < id.length; i++) seed = (seed * 31 + id.charCodeAt(i)) | 0;
-    return Math.abs(seed % 997);
-  }
-
-  private drawElectricity(g: Phaser.GameObjects.Graphics, x: number, y: number, phase: number): void {
-    g.fillStyle(0x55eaff, 0.16).fillCircle(x, y, 39 + Math.sin(phase) * 3);
-    for (let bolt = 0; bolt < 4; bolt++) {
-      const angle = bolt * Math.PI / 2 + phase * 0.08;
-      let px = x + Math.cos(angle) * 20;
-      let py = y + Math.sin(angle) * 24;
-      g.lineStyle(3, bolt % 2 ? 0xfff45c : 0x6ffcff, 0.95).beginPath().moveTo(px, py);
-      for (let segment = 1; segment <= 3; segment++) {
-        const radius = 20 + segment * 9;
-        const jitter = Math.sin(phase + bolt * 4 + segment * 7) * 5;
-        px = x + Math.cos(angle) * radius + Math.cos(angle + Math.PI / 2) * jitter;
-        py = y + Math.sin(angle) * radius + Math.sin(angle + Math.PI / 2) * jitter;
-        g.lineTo(px, py);
-      }
-      g.strokePath();
-    }
   }
 
   private drawKey(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
@@ -633,7 +567,6 @@ export class GameScene extends Phaser.Scene {
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     this.network.socket.off("game:snapshot", this.onSnapshot);
-    this.network.socket.off("game:playerContact", this.onPlayerContact);
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = undefined;
     this.scale.off(Phaser.Scale.Events.RESIZE, this.coverBackground, this);
@@ -643,7 +576,6 @@ export class GameScene extends Phaser.Scene {
     this.crystalTextureKeys.clear();
     this.previousSnapshot = undefined;
     this.frictionParticles = [];
-    this.contactFlashUntil.clear();
     this.lastPredictedVelocityX = 0;
   };
 }

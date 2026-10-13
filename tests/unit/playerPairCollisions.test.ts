@@ -34,85 +34,27 @@ describe("authoritative per-player-pair collisions", () => {
     vi.restoreAllMocks();
   });
 
-  it("emits one event for sustained contact and exposes no global counter", () => {
+  it("never kills or emits effects for sustained and repeated contact", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-31T12:00:00Z"));
     const game = new ServerGame();
     game.addPlayer("a", "A", 1);
     game.addPlayer("b", "B", 2);
-    expect(game.snapshot()).not.toHaveProperty("teamCharge");
     collide(game, "a", "b");
-    expect(game.drainPlayerContactEvents()).toEqual([{
-      playerA: { id: "a", name: "A", color: 1 },
-      playerB: { id: "b", name: "B", color: 2 },
-      occurredAt: expect.any(Number),
-      collisionCount: 1,
-      collisionLimit: 3,
-      fatal: false,
-    }]);
     game.step();
     expect(game.drainPlayerContactEvents()).toEqual([]);
-  });
-
-  it("requires separation and the per-pair cooldown", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-31T12:00:00Z"));
-    const game = new ServerGame();
-    game.addPlayer("a", "A", 1);
-    game.addPlayer("b", "B", 2);
-    collide(game, "a", "b");
-    separate(game, "b");
-    vi.advanceTimersByTime(PHYSICS.PLAYER_COLLISION_COOLDOWN_MS - 1);
-    collide(game, "a", "b");
-    expect(player(game, "a").deadUntil).toBe(0);
-    separate(game, "b");
-    vi.advanceTimersByTime(1);
-    collide(game, "a", "b");
-    expect(player(game, "a").deadUntil).toBe(0);
-  });
-
-  it("kills only the pair on its third valid collision and respawns each at its checkpoint", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-31T12:00:00Z"));
-    const game = new ServerGame();
-    game.addPlayer("a", "A", 1);
-    game.addPlayer("b", "B", 2);
-    game.addPlayer("c", "C", 3);
-
-    Matter.Body.setPosition(player(game, "a").body, { x: level1.checkpoint.x + 10, y: 300 });
-    game.step();
-    expect(player(game, "a").checkpoint).toEqual({ x: level1.checkpoint.x, y: level1.checkpoint.y });
-
-    collide(game, "a", "b");
-    collideAgainAfterCooldown(game, "a", "b");
-    collideAgainAfterCooldown(game, "a", "b");
-
-    expect(game.snapshot().players.find((p) => p.id === "a")?.state).toBe("Dead");
-    expect(game.snapshot().players.find((p) => p.id === "a")?.electrocutedUntil).toBe(Date.now() + PHYSICS.RESPAWN_DELAY_MS);
-    expect(game.snapshot().players.find((p) => p.id === "b")?.state).toBe("Dead");
-    expect(game.snapshot().players.find((p) => p.id === "c")?.state).not.toBe("Dead");
-    expect(player(game, "c").deadUntil).toBe(0);
-
-    vi.advanceTimersByTime(PHYSICS.RESPAWN_DELAY_MS + 1);
-    game.step();
-    expect(player(game, "a").body.position.x).toBeCloseTo(level1.checkpoint.x, 0);
-    expect(player(game, "a").body.position.y).toBeCloseTo(level1.checkpoint.y, 0);
-    expect(player(game, "b").body.position.x).toBeCloseTo(initialSpawnSlots()[1]!.x, 0);
-    expect(game.snapshot().players.find((p) => p.id === "a")?.electrocutedUntil).toBeUndefined();
-  });
-
-  it("tracks collision limits independently for different pairs", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-31T12:00:00Z"));
-    const game = new ServerGame();
-    game.addPlayer("a", "A", 1);
-    game.addPlayer("b", "B", 2);
-    game.addPlayer("c", "C", 3);
-    collide(game, "a", "b");
-    collideAgainAfterCooldown(game, "a", "b");
-    separate(game, "b");
-    collide(game, "a", "c");
-    expect(player(game, "a").deadUntil).toBe(0);
-    expect(player(game, "b").deadUntil).toBe(0);
-    expect(player(game, "c").deadUntil).toBe(0);
+    for (let index = 0; index < 10; index++) {
+      collideAgainAfterCooldown(game, "a", "b");
+      expect(game.drainPlayerContactEvents()).toEqual([]);
+      for (const id of ["a", "b"]) {
+        expect(player(game, id).deadUntil).toBe(0);
+        expect(player(game, id).body.isStatic).toBe(false);
+        expect(player(game, id).body.isSensor).toBe(false);
+        const snapshot = game.snapshot().players.find((p) => p.id === id)!;
+        expect(snapshot.state).not.toBe("Dead");
+        expect(snapshot.electrocutedUntil).toBeUndefined();
+      }
+    }
   });
 
   it("spawns twelve players without overlap or an initial collision penalty", () => {

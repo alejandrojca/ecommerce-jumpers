@@ -1,5 +1,5 @@
 import {
-  advanceHorizontalMotion, INITIAL_CRYSTAL_MOTION, PHYSICS,
+  advanceJumpControl, initialJumpMotion, jumpGravity, advanceHorizontalMotion, INITIAL_CRYSTAL_MOTION, NETWORK, PHYSICS,
   type CrystalMotionState, type GameSnapshot, type PlayerInput, type PlayerSnapshot
 } from "@tetherbound/shared";
 
@@ -29,7 +29,9 @@ export class ClientPrediction {
   private exited = false;
   private authoritativeState?: PlayerSnapshot["state"];
   private supportId?: string;
-  private jumpStartFeetY?: number;
+  private jumpMotion = initialJumpMotion();
+  private simulationTime = 0;
+  private previousJumpHeld = false;
   private surfaces: PredictiveSurface[] = [];
   private crystalMotion: CrystalMotionState = { ...INITIAL_CRYSTAL_MOTION };
 
@@ -50,7 +52,7 @@ export class ClientPrediction {
   reconcile(authoritative: PlayerSnapshot, snapshot?: GameSnapshot): number {
     if (snapshot) this.updateSurfaces(snapshot, authoritative.id);
     if (!this.initialized) {
-      this.setAuthoritative(authoritative);
+      this.setAuthoritative(authoritative, snapshot?.serverTime);
       this.grounded = authoritative.grounded;
       this.supportId = authoritative.support?.id;
       this.snapToAuthoritativeSupport(authoritative);
@@ -64,7 +66,7 @@ export class ClientPrediction {
     const previousY = this.y;
     this.pending = this.pending.filter((p) => p.input.sequence > authoritative.lastProcessedInput);
     const previousState = this.authoritativeState;
-    this.setAuthoritative(authoritative);
+    this.setAuthoritative(authoritative, snapshot?.serverTime);
     this.grounded = authoritative.grounded;
     this.supportId = authoritative.support?.id;
     this.snapToAuthoritativeSupport(authoritative);
@@ -107,6 +109,7 @@ export class ClientPrediction {
       this.simulationVy = standingSurface.velocityY;
       this.supportId = standingSurface.id;
     }
+    if (this.movementLocked) this.jumpMotion = initialJumpMotion();
     const direction = this.movementLocked ? 0 : Number(input.right) - Number(input.left);
     const motion = advanceHorizontalMotion(
       this.simulationVx,
@@ -118,15 +121,29 @@ export class ClientPrediction {
     );
     this.simulationVx = motion.velocityX;
     this.crystalMotion = motion.crystal;
-    if (!this.movementLocked && input.jumpPressed && this.grounded) {
-      this.simulationVy = PHYSICS.JUMP_VELOCITY;
-      this.jumpStartFeetY = this.simulationY + PHYSICS.PLAYER_HEIGHT / 2;
+    this.simulationTime += dt * 1000;
+    if (!this.movementLocked && input.jumpPressed && !this.previousJumpHeld) {
+      this.jumpMotion.jumpBufferedUntil = this.simulationTime + PHYSICS.JUMP_BUFFER_MS;
+    }
+    this.previousJumpHeld = input.jumpHeld;
+    const jump = advanceJumpControl(this.jumpMotion, this.simulationTime,
+      !this.movementLocked && this.grounded, this.simulationVy,
+      this.simulationY + PHYSICS.PLAYER_HEIGHT / 2, input.jumpHeld);
+    this.simulationVy = jump.velocityY;
+    if (jump.jumped) {
       this.grounded = false;
       this.supportId = undefined;
     }
     const velocityBeforeGravity = this.simulationVy;
+    let verticalDisplacement = 0;
     if (!this.grounded) {
-      this.simulationVy = Math.min(PHYSICS.MAX_FALL_SPEED, velocityBeforeGravity + PHYSICS.GRAVITY * dt);
+      // Match Matter's substep semi-implicit integration and terminal speed.
+      const substeps = Math.max(1, Math.ceil(dt * NETWORK.SERVER_TICK_RATE * PHYSICS.PHYSICS_SUBSTEPS));
+      const step = dt / substeps;
+      for (let substep = 0; substep < substeps; substep++) {
+        this.simulationVy = Math.min(PHYSICS.MAX_FALL_SPEED, this.simulationVy + jumpGravity(this.simulationVy) * step);
+        verticalDisplacement += this.simulationVy * step;
+      }
     } else {
       this.simulationVy = 0;
     }
@@ -141,14 +158,23 @@ export class ClientPrediction {
     }
     let nextY = this.grounded
       ? this.simulationY
-      : this.simulationY + velocityBeforeGravity * dt + PHYSICS.GRAVITY * dt * dt / 2;
-    if (this.jumpStartFeetY !== undefined) {
-      const apexY = this.jumpStartFeetY - PHYSICS.MAX_JUMP_HEIGHT - PHYSICS.PLAYER_HEIGHT / 2;
-      // Resolve the analytical apex rather than accepting a frame-sampled one.
-      if (velocityBeforeGravity < 0 && this.simulationVy >= 0) nextY = apexY;
+      : this.simulationY + verticalDisplacement;
+    if (this.jumpMotion.jumpStartFeetY !== undefined) {
+      const apexY = this.jumpMotion.jumpStartFeetY - PHYSICS.MAX_JUMP_HEIGHT - PHYSICS.PLAYER_HEIGHT / 2;
       if (nextY < apexY) {
         nextY = apexY;
         if (this.simulationVy < 0) this.simulationVy = 0;
+      }
+    }
+    if (!this.grounded && velocityBeforeGravity < 0) {
+      const previousTop = this.simulationY - PHYSICS.PLAYER_HEIGHT / 2;
+      const nextTop = nextY - PHYSICS.PLAYER_HEIGHT / 2;
+      const ceiling = this.surfaces.filter((surface) => this.overlapsHorizontally(nextX, surface)
+        && previousTop >= surface.bottomY - 2 && nextTop <= surface.bottomY)
+        .sort((a, b) => b.bottomY - a.bottomY)[0];
+      if (ceiling) {
+        nextY = ceiling.bottomY + PHYSICS.PLAYER_HEIGHT / 2;
+        this.simulationVy = Math.max(0, ceiling.velocityY);
       }
     }
     if (!this.grounded && this.simulationVy >= 0) {
@@ -159,14 +185,17 @@ export class ClientPrediction {
         this.simulationVy = landing.velocityY;
         this.grounded = true;
         this.supportId = landing.id;
-        this.jumpStartFeetY = undefined;
+        this.jumpMotion.jumpStartFeetY = undefined;
       }
     }
     this.simulationX = nextX;
     this.simulationY = nextY;
   }
 
-  private setAuthoritative(authoritative: PlayerSnapshot): void {
+  private setAuthoritative(authoritative: PlayerSnapshot, serverTime?: number): void {
+    this.simulationTime = serverTime ?? 0;
+    this.jumpMotion = authoritative.jumpMotion ? { ...authoritative.jumpMotion } : initialJumpMotion();
+    this.previousJumpHeld = authoritative.jumpHeld ?? false;
     this.simulationX = authoritative.x;
     this.simulationY = authoritative.y;
     this.simulationVx = authoritative.velocityX;

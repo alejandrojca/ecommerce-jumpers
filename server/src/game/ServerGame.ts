@@ -1,6 +1,6 @@
 import Matter from "matter-js";
 import {
-  advanceHorizontalMotion, INITIAL_CRYSTAL_MOTION, NETWORK, PHYSICS, ROOM_MAX_PLAYERS,
+  advanceJumpControl, jumpGravity, advanceHorizontalMotion, INITIAL_CRYSTAL_MOTION, NETWORK, PHYSICS, ROOM_MAX_PLAYERS,
   type CrystalMotionState, type EditableMapDefinition, type EditableMapObject,
   type GameSnapshot, type PlayerContactEvent, type PlayerInput, type PlayerSnapshot
 } from "@tetherbound/shared";
@@ -20,7 +20,7 @@ interface PlayerRuntime {
   grounded: boolean;
   coyoteUntil: number;
   jumpBufferedUntil: number;
-  jumpWasHeld: boolean;
+  jumpCutApplied: boolean;
   jumpStartFeetY?: number;
   deadUntil: number;
   invulnerableUntil: number;
@@ -95,11 +95,6 @@ export class ServerGame {
   private readonly keyDefinition: EditableMapObject;
   private readonly doorDefinition: EditableMapObject;
   private readonly deathY: number;
-  private static readonly MAX_PAIR_COLLISIONS = 3;
-  private readonly touchingPlayerPairs = new Set<string>();
-  private readonly playerPairCooldownUntil = new Map<string, number>();
-  private readonly playerPairCollisionCounts = new Map<string, number>();
-  private readonly pendingPlayerContacts: PlayerContactEvent[] = [];
   private tick = 0;
   private keyCollected = false;
   private keyHolder?: string;
@@ -110,7 +105,7 @@ export class ServerGame {
 
   constructor(map?: EditableMapDefinition) {
     this.engine.gravity.y = 1;
-    this.engine.gravity.scale = 0.00039;
+    this.engine.gravity.scale = PHYSICS.GRAVITY / 1_000_000;
     if (map) {
       this.platformDefinitions = map.objects.filter((object) => object.kind === "platform" || object.kind === "movingPlatform");
       this.boxDefinitions = map.objects.filter((object) => object.kind === "box");
@@ -191,7 +186,7 @@ export class ServerGame {
     Matter.Composite.add(this.engine.world, body);
     this.players.set(id, {
       id, name, color, body, input: { ...EMPTY_INPUT }, lastSequence: 0,
-      grounded: false, coyoteUntil: 0, jumpBufferedUntil: 0, jumpWasHeld: false,
+      grounded: false, coyoteUntil: 0, jumpBufferedUntil: 0, jumpCutApplied: false,
       jumpStartFeetY: undefined,
       deadUntil: 0, invulnerableUntil: 0, checkpoint: { ...spawn }, connected: true,
       voidLocked: false, supportedHangingPlayers: 0,
@@ -234,19 +229,17 @@ export class ServerGame {
     if (!player) return;
     if (player.inWorld) Matter.Composite.remove(this.engine.world, player.body);
     this.players.delete(id);
-    for (const key of [...this.touchingPlayerPairs]) if (key.split("|").includes(id)) this.touchingPlayerPairs.delete(key);
-    for (const key of [...this.playerPairCooldownUntil.keys()]) if (key.split("|").includes(id)) this.playerPairCooldownUntil.delete(key);
-    for (const key of [...this.playerPairCollisionCounts.keys()]) if (key.split("|").includes(id)) this.playerPairCollisionCounts.delete(key);
   }
 
   acceptInput(id: string, input: PlayerInput): boolean {
     const p = this.players.get(id);
     if (!p || !p.connected || p.exitedAt !== undefined || input.sequence <= p.lastSequence || p.deadUntil > Date.now()) return false;
+    const previousJumpHeld = p.input.jumpHeld;
     p.input = p.voidLocked
       ? { ...input, left: false, right: false, jumpPressed: false, jumpHeld: false }
       : input;
     p.lastSequence = input.sequence;
-    if (!p.voidLocked && input.jumpPressed) {
+    if (!p.voidLocked && input.jumpPressed && !previousJumpHeld) {
       p.jumpBufferedUntil = Date.now() + PHYSICS.JUMP_BUFFER_MS;
     }
     return true;
@@ -266,9 +259,18 @@ export class ServerGame {
     }
     for (let substep = 0; substep < substeps; substep++) {
       this.movePlatforms(substepDt);
+      for (const p of this.players.values()) {
+        if (p.exitedAt !== undefined || p.deadUntil > now || p.body.isStatic) continue;
+        const extraGravity = jumpGravity(p.body.velocity.y * 60) - PHYSICS.GRAVITY;
+        Matter.Body.applyForce(p.body, p.body.position, { x: 0, y: p.body.mass * extraGravity / 1_000_000 });
+      }
       Matter.Engine.update(this.engine, (1000 / NETWORK.SERVER_TICK_RATE) / substeps);
+      for (const p of this.players.values()) {
+        if (p.body.velocity.y * 60 > PHYSICS.MAX_FALL_SPEED) {
+          Matter.Body.setVelocity(p.body, { x: p.body.velocity.x, y: PHYSICS.MAX_FALL_SPEED / 60 });
+        }
+      }
     }
-    this.updatePlayerContacts(now);
     for (const p of this.players.values()) {
       if (p.exitedAt === undefined) this.postPhysics(p, now);
     }
@@ -293,12 +295,19 @@ export class ServerGame {
       Matter.Body.setPosition(p.body, p.checkpoint);
       Matter.Body.setVelocity(p.body, { x: 0, y: 0 });
       p.crystalMotion = { ...INITIAL_CRYSTAL_MOTION };
+      p.grounded = false;
+      p.supportBody = undefined;
+      p.coyoteUntil = 0;
+      p.jumpBufferedUntil = 0;
+      p.jumpCutApplied = false;
+      p.jumpStartFeetY = undefined;
+      p.input = { ...EMPTY_INPUT, sequence: p.lastSequence };
     }
     if (p.voidLocked) {
       p.input = { ...p.input, left: false, right: false, jumpPressed: false, jumpHeld: false };
       p.jumpBufferedUntil = 0;
       p.coyoteUntil = 0;
-      p.jumpWasHeld = false;
+      p.jumpCutApplied = false;
       Matter.Body.setVelocity(p.body, {
         x: p.body.velocity.x,
         y: Math.min(p.body.velocity.y, PHYSICS.MAX_FALL_SPEED / 60)
@@ -315,17 +324,13 @@ export class ServerGame {
       x: motion.velocityX / 60,
       y: Math.min(p.body.velocity.y, PHYSICS.MAX_FALL_SPEED / 60)
     });
-    if (p.grounded) p.coyoteUntil = now + PHYSICS.COYOTE_TIME_MS;
-    if (p.jumpBufferedUntil >= now && p.coyoteUntil >= now) {
-      Matter.Body.setVelocity(p.body, { x: p.body.velocity.x, y: PHYSICS.JUMP_VELOCITY / 60 });
-      p.jumpStartFeetY = p.body.position.y + PHYSICS.PLAYER_HEIGHT / 2;
-      p.jumpBufferedUntil = 0;
-      p.coyoteUntil = 0;
+    const jump = advanceJumpControl(p, now, p.grounded, p.body.velocity.y * 60,
+      p.body.position.y + PHYSICS.PLAYER_HEIGHT / 2, p.input.jumpHeld);
+    Matter.Body.setVelocity(p.body, { x: p.body.velocity.x, y: jump.velocityY / 60 });
+    if (jump.jumped) {
       p.grounded = false;
+      p.supportBody = undefined;
     }
-    // The impulse is the whole jump: holding or releasing cannot add energy
-    // or turn a normal jump into a precision-dependent short hop.
-    p.jumpWasHeld = p.input.jumpHeld;
   }
 
   private postPhysics(p: PlayerRuntime, now: number): void {
@@ -338,7 +343,9 @@ export class ServerGame {
         if (b.velocity.y < 0) Matter.Body.setVelocity(b, { x: b.velocity.x, y: 0 });
       }
     }
-    const contact = findGroundContact(b, this.engine.pairs.list);
+    // Matter may retain the launch contact for a substep: rising is not landing.
+    const candidate = findGroundContact(b, this.engine.pairs.list);
+    const contact = candidate && b.velocity.y >= candidate.support.velocity.y - 0.05 ? candidate : undefined;
     p.grounded = contact !== undefined;
     p.supportBody = contact?.support;
     if (contact) p.jumpStartFeetY = undefined;
@@ -482,7 +489,7 @@ export class ServerGame {
       player.supportBody = undefined;
       player.coyoteUntil = 0;
       player.jumpBufferedUntil = 0;
-      player.jumpWasHeld = false;
+      player.jumpCutApplied = false;
       player.jumpStartFeetY = undefined;
       player.deadUntil = 0;
       player.voidLocked = false;
@@ -496,77 +503,11 @@ export class ServerGame {
       }
     }
     this.teamRespawnAt = 0;
-    this.touchingPlayerPairs.clear();
-    this.playerPairCooldownUntil.clear();
   }
 
-  private updatePlayerContacts(now: number): void {
-    const current = new Set<string>();
-    const eligible = (id: string): boolean => {
-      const player = this.players.get(id);
-      return !!player && player.connected && player.inWorld && player.exitedAt === undefined
-        && !player.voidLocked && player.deadUntil <= now;
-    };
-    for (const pair of this.engine.pairs.list) {
-      if (!pair.isActive) continue;
-      const a = pair.bodyA.label.startsWith("player:") ? pair.bodyA.label.slice(7) : undefined;
-      const b = pair.bodyB.label.startsWith("player:") ? pair.bodyB.label.slice(7) : undefined;
-      if (!a || !b || a === b || !eligible(a) || !eligible(b)) continue;
-      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
-      current.add(key);
-    }
-    const entered = [...current].filter((key) =>
-      !this.touchingPlayerPairs.has(key) && now >= (this.playerPairCooldownUntil.get(key) ?? 0)
-    ).sort();
-    this.touchingPlayerPairs.clear();
-    for (const key of current) this.touchingPlayerPairs.add(key);
-    if (entered.length === 0) return;
-    for (const key of entered) {
-      this.playerPairCooldownUntil.set(key, now + PHYSICS.PLAYER_COLLISION_COOLDOWN_MS);
-      const [aId, bId] = key.split("|");
-      const a = this.players.get(aId!);
-      const b = this.players.get(bId!);
-      if (a && b) {
-        const collisionCount = (this.playerPairCollisionCounts.get(key) ?? 0) + 1;
-        const fatal = collisionCount >= ServerGame.MAX_PAIR_COLLISIONS;
-        this.pendingPlayerContacts.push({
-          playerA: { id: a.id, name: a.name, color: a.color },
-          playerB: { id: b.id, name: b.name, color: b.color },
-          occurredAt: now,
-          collisionCount,
-          collisionLimit: ServerGame.MAX_PAIR_COLLISIONS,
-          fatal,
-        });
-        if (fatal) {
-          this.playerPairCollisionCounts.delete(key);
-          this.killCollisionPair(a, b, now);
-        } else {
-          this.playerPairCollisionCounts.set(key, collisionCount);
-        }
-      }
-    }
-  }
-
+  // Player contact is physical only: no penalties or presentation events.
   drainPlayerContactEvents(): PlayerContactEvent[] {
-    return this.pendingPlayerContacts.splice(0);
-  }
-
-  private killCollisionPair(a: PlayerRuntime, b: PlayerRuntime, now: number): void {
-    const respawnAt = now + PHYSICS.RESPAWN_DELAY_MS;
-    for (const player of [a, b]) {
-      if (!player.connected || !player.inWorld || player.exitedAt !== undefined) continue;
-      player.deadUntil = respawnAt;
-      player.electrocutedUntil = respawnAt;
-      player.input = { ...EMPTY_INPUT, sequence: player.lastSequence };
-      Matter.Body.setVelocity(player.body, { x: 0, y: 0 });
-      Matter.Body.setStatic(player.body, true);
-      player.body.isSensor = true;
-    }
-    this.touchingPlayerPairs.delete(this.pairKey(a.id, b.id));
-  }
-
-  private pairKey(a: string, b: string): string {
-    return a < b ? `${a}|${b}` : `${b}|${a}`;
+    return [];
   }
 
   private isInsideExit(player: PlayerRuntime): boolean {
@@ -597,6 +538,8 @@ export class ServerGame {
         connected: p.connected, lastProcessedInput: p.lastSequence,
         supportedHangingPlayers: p.supportedHangingPlayers,
         crystalMotion: { ...p.crystalMotion },
+        jumpHeld: p.input.jumpHeld,
+        jumpMotion: { coyoteUntil: p.coyoteUntil, jumpBufferedUntil: p.jumpBufferedUntil, jumpCutApplied: p.jumpCutApplied, jumpStartFeetY: p.jumpStartFeetY },
         exitedAt: p.exitedAt,
         electrocutedUntil: p.electrocutedUntil && p.electrocutedUntil > Date.now()
           ? p.electrocutedUntil
@@ -644,10 +587,6 @@ export class ServerGame {
     this.matchStartedAt = Date.now();
     this.exitTimes.clear();
     this.teamRespawnAt = 0;
-    this.touchingPlayerPairs.clear();
-    this.playerPairCooldownUntil.clear();
-    this.playerPairCollisionCounts.clear();
-    this.pendingPlayerContacts.length = 0;
     for (const player of this.players.values()) player.exitedAt = undefined;
     this.randomizeSpawnOrder();
     const slots = this.spawnSlots;
@@ -661,6 +600,11 @@ export class ServerGame {
       p.supportedHangingPlayers = 0;
       p.supportBody = undefined;
       p.jumpStartFeetY = undefined;
+      p.grounded = false;
+      p.coyoteUntil = 0;
+      p.jumpBufferedUntil = 0;
+      p.jumpCutApplied = false;
+      p.input = { ...EMPTY_INPUT, sequence: p.lastSequence };
       p.crystalMotion = { ...INITIAL_CRYSTAL_MOTION };
       if (!p.inWorld) {
         Matter.Composite.add(this.engine.world, p.body);

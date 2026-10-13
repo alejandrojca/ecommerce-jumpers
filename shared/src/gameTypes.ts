@@ -36,6 +36,8 @@ export interface PlayerSnapshot {
   connected: boolean;
   lastProcessedInput: number;
   supportedHangingPlayers: number;
+  jumpHeld?: boolean;
+  jumpMotion?: import("./jumpRules.js").JumpMotionState;
   crystalMotion?: {
     glideRemaining: number;
     coasting: boolean;

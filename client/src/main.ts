@@ -1,6 +1,6 @@
 import "./style.css";
 import {
-  type EditableMapDefinition, type PlayerContactEvent, type RoomReply, type RoomView, type VictoryResult
+  type EditableMapDefinition, type RoomReply, type RoomView, type VictoryResult
 } from "@tetherbound/shared";
 import { SocketClient } from "./network/SocketClient";
 import { createGame } from "./game/Game";
@@ -13,7 +13,6 @@ app.innerHTML = `
   <div class="shell" id="shell"></div>
   <div class="hud" id="hud" hidden>
     <div class="mission" id="mission">Encuentren la llave y lleguen juntos a la salida</div>
-    <div class="contact-feed" id="contact-feed" aria-live="polite" aria-label="Contactos entre jugadores"></div>
     <div class="room-pill" id="room-pill"></div>
     <button class="sound-toggle" id="sound-toggle" type="button" aria-label="Silenciar sonidos"></button>
     <button class="exit-game" id="exit-game" type="button" hidden>Salir</button>
@@ -37,7 +36,6 @@ const shell = document.querySelector<HTMLElement>("#shell")!;
 const hud = document.querySelector<HTMLElement>("#hud")!;
 const toast = document.querySelector<HTMLElement>("#toast")!;
 const mission = document.querySelector<HTMLElement>("#mission")!;
-const contactFeed = document.querySelector<HTMLElement>("#contact-feed")!;
 const soundToggle = document.querySelector<HTMLButtonElement>("#sound-toggle")!;
 const exitGameButton = document.querySelector<HTMLButtonElement>("#exit-game")!;
 const gameConfirm = document.querySelector<HTMLElement>("#game-confirm")!;
@@ -262,7 +260,6 @@ function showGame(): void {
   shell.hidden = true;
   hud.hidden = false;
   document.querySelector<HTMLElement>("#room-pill")!.textContent = room?.code ?? "";
-  contactFeed.replaceChildren();
   gameConfirm.hidden = true;
   updateLeaderExitButton();
 }
@@ -302,24 +299,6 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-function showPlayerContact(contact: PlayerContactEvent): void {
-  gameAudio.touch();
-  const message = document.createElement("div");
-  message.className = "contact-message";
-  const [first, second] = Math.random() < 0.5
-    ? [contact.playerA, contact.playerB]
-    : [contact.playerB, contact.playerA];
-  const firstColor = `#${first.color.toString(16).padStart(6, "0")}`;
-  const secondColor = `#${second.color.toString(16).padStart(6, "0")}`;
-  message.innerHTML = `
-    <span class="contact-player"><span class="contact-dot" style="--color:${firstColor}"></span>${escape(first.name)}</span>
-    <span class="contact-action">y</span>
-    <span class="contact-player"><span class="contact-dot" style="--color:${secondColor}"></span>${escape(second.name)}</span>
-    <span class="contact-action">se tocaron</span>`;
-  while (contactFeed.children.length >= 6) contactFeed.firstElementChild?.remove();
-  contactFeed.append(message);
-  window.setTimeout(() => message.remove(), 1500);
-}
 
 function formatTime(timeMs: number): string {
   const minutes = Math.floor(timeMs / 60_000);
@@ -393,7 +372,6 @@ network.socket.on("room:closed", (message) => {
   gameStarted = false;
   gameConfirm.hidden = true;
   confirmExitButton.disabled = false;
-  contactFeed.replaceChildren();
   notice = message;
   renderMenu();
 });
@@ -401,7 +379,6 @@ network.socket.on("game:started", (map) => {
   network.activeMap = map;
   showGame();
 });
-network.socket.on("game:playerContact", showPlayerContact);
 network.socket.on("game:snapshot", (snapshot) => {
   mission.textContent = snapshot.keyState.collected
     ? `Puerta abierta · ${snapshot.doorState.inside}/${snapshot.doorState.required} en la salida`
